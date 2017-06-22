@@ -454,6 +454,10 @@ if [ $HTTP = YES ]; then
         . auto/module
     fi
 
+    if [ $HTTP_V2_HPACK_ENC = YES ]; then
+        have=NGX_HTTP_V2_HPACK_ENC . auto/have
+    fi
+
     if :; then
         ngx_module_name=ngx_http_static_module
         ngx_module_incs=

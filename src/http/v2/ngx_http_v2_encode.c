@@ -10,7 +10,7 @@
 #include <ngx_http.h>
 
 
-static u_char *ngx_http_v2_write_int(u_char *pos, ngx_uint_t prefix,
+u_char *ngx_http_v2_write_int(u_char *pos, ngx_uint_t prefix,
     ngx_uint_t value);
 
 
@@ -40,7 +40,7 @@ ngx_http_v2_string_encode(u_char *dst, u_char *src, size_t len, u_char *tmp,
 }
 
 
-static u_char *
+u_char *
 ngx_http_v2_write_int(u_char *pos, ngx_uint_t prefix, ngx_uint_t value)
 {
     if (value < prefix) {

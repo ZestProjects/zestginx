@@ -52,6 +52,14 @@
 #define NGX_HTTP_V2_MAX_WINDOW           ((1U << 31) - 1)
 #define NGX_HTTP_V2_DEFAULT_WINDOW       65535
 
+#define HPACK_ENC_HTABLE_SZ              128 /* better to keep a PoT < 64k */
+#define HPACK_ENC_HTABLE_ENTRIES         ((HPACK_ENC_HTABLE_SZ * 100) / 128)
+#define HPACK_ENC_DYNAMIC_KEY_TBL_SZ     10  /* 10 is sufficient for most */
+#define HPACK_ENC_MAX_ENTRY              512 /* longest header size to match */
+
+#define NGX_HTTP_V2_DEFAULT_HPACK_TABLE_SIZE     4096
+#define NGX_HTTP_V2_MAX_HPACK_TABLE_SIZE         16384 /* < 64k */
+
 #define NGX_HTTP_V2_DEFAULT_WEIGHT       16
 
 
@@ -115,6 +123,46 @@ typedef struct {
 } ngx_http_v2_hpack_t;
 
 
+#if (NGX_HTTP_V2_HPACK_ENC)
+typedef struct {
+    uint64_t                         hash_val;
+    uint32_t                         index;
+    uint16_t                         pos;
+    uint16_t                         klen, vlen;
+    uint16_t                         size;
+    uint16_t                         next;
+} ngx_http_v2_hpack_enc_entry_t;
+
+
+typedef struct {
+    uint64_t                         hash_val;
+    uint32_t                         index;
+    uint16_t                         pos;
+    uint16_t                         klen;
+} ngx_http_v2_hpack_name_entry_t;
+
+
+typedef struct {
+    size_t                           size;    /* size as defined in RFC 7541 */
+    uint32_t                         top;     /* the last entry */
+    uint32_t                         pos;
+    uint16_t                         n_elems; /* number of elements */
+    uint16_t                         base;    /* index of the oldest entry */
+    uint16_t                         last;    /* index of the newest entry */
+
+    /* hash table for dynamic entries, instead using a generic hash table,
+       which would be too slow to process a significant amount of headers,
+       this table is not determenistic, and might ocasionally fail to insert
+       a value, at the cost of slightly worse compression, but significantly
+       faster performance */
+    ngx_http_v2_hpack_enc_entry_t    htable[HPACK_ENC_HTABLE_SZ];
+    ngx_http_v2_hpack_name_entry_t   heads[HPACK_ENC_DYNAMIC_KEY_TBL_SZ];
+    u_char                           storage[NGX_HTTP_V2_MAX_HPACK_TABLE_SIZE +
+                                             HPACK_ENC_MAX_ENTRY];
+} ngx_http_v2_hpack_enc_t;
+#endif
+
+
 struct ngx_http_v2_connection_s {
     ngx_connection_t                *connection;
     ngx_http_connection_t           *http_connection;
@@ -135,6 +183,8 @@ struct ngx_http_v2_connection_s {
     size_t                           init_window;
 
     size_t                           frame_size;
+
+    size_t                           max_hpack_table_size;
 
     ngx_queue_t                      waiting;
 
@@ -163,6 +213,11 @@ struct ngx_http_v2_connection_s {
     unsigned                         blocked:1;
     unsigned                         goaway:1;
     unsigned                         push_disabled:1;
+    unsigned                         indicate_resize:1;
+
+#if (NGX_HTTP_V2_HPACK_ENC)
+    ngx_http_v2_hpack_enc_t          hpack_enc;
+#endif
 };
 
 
@@ -205,6 +260,8 @@ struct ngx_http_v2_stream_s {
     ngx_queue_t                      queue;
 
     ngx_array_t                     *cookies;
+
+    size_t                           header_limit;
 
     ngx_pool_t                      *pool;
 
@@ -417,5 +474,36 @@ size_t ngx_http_v2_huff_encode(u_char *src, size_t len, u_char *dst,
 u_char *ngx_http_v2_string_encode(u_char *dst, u_char *src, size_t len,
     u_char *tmp, ngx_uint_t lower);
 
+
+u_char *ngx_http_v2_string_encode(u_char *dst, u_char *src, size_t len,
+    u_char *tmp, ngx_uint_t lower);
+
+u_char *
+ngx_http_v2_write_int(u_char *pos, ngx_uint_t prefix, ngx_uint_t value);
+
+#define ngx_http_v2_write_name(dst, src, len, tmp)                            \
+    ngx_http_v2_string_encode(dst, src, len, tmp, 1)
+#define ngx_http_v2_write_value(dst, src, len, tmp)                           \
+    ngx_http_v2_string_encode(dst, src, len, tmp, 0)
+
+u_char *
+ngx_http_v2_write_header(ngx_http_v2_connection_t *h2c, u_char *pos,
+    u_char *key, size_t key_len, u_char *value, size_t value_len,
+    u_char *tmp);
+
+void
+ngx_http_v2_table_resize(ngx_http_v2_connection_t *h2c);
+
+#define ngx_http_v2_write_header_str(key, value)                        \
+    ngx_http_v2_write_header(h2c, pos, (u_char *) key, sizeof(key) - 1, \
+    (u_char *) value, sizeof(value) - 1, tmp);
+
+#define ngx_http_v2_write_header_tbl(key, val)                          \
+    ngx_http_v2_write_header(h2c, pos, (u_char *) key, sizeof(key) - 1, \
+    val.data, val.len, tmp);
+
+#define ngx_http_v2_write_header_pot(key, val)                          \
+    ngx_http_v2_write_header(h2c, pos, (u_char *) key, sizeof(key) - 1, \
+    val->data, val->len, tmp);
 
 #endif /* _NGX_HTTP_V2_H_INCLUDED_ */

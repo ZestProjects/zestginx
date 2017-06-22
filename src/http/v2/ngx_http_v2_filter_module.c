@@ -23,8 +23,51 @@
 #define ngx_http_v2_literal_size(h)                                           \
     (ngx_http_v2_integer_octets(sizeof(h) - 1) + sizeof(h) - 1)
 
+#define ngx_http_v2_indexed(i)      (128 + (i))
+#define ngx_http_v2_inc_indexed(i)  (64 + (i))
+
+#define NGX_HTTP_V2_ENCODE_RAW            0
+#define NGX_HTTP_V2_ENCODE_HUFF           0x80
+
+#define NGX_HTTP_V2_AUTHORITY_INDEX       1
+#define NGX_HTTP_V2_METHOD_GET_INDEX      2
+#define NGX_HTTP_V2_PATH_INDEX            4
+
+#define NGX_HTTP_V2_SCHEME_HTTP_INDEX     6
+#define NGX_HTTP_V2_SCHEME_HTTPS_INDEX    7
+
+#define NGX_HTTP_V2_STATUS_INDEX          8
+#define NGX_HTTP_V2_STATUS_200_INDEX      8
+#define NGX_HTTP_V2_STATUS_204_INDEX      9
+#define NGX_HTTP_V2_STATUS_206_INDEX      10
+#define NGX_HTTP_V2_STATUS_304_INDEX      11
+#define NGX_HTTP_V2_STATUS_400_INDEX      12
+#define NGX_HTTP_V2_STATUS_404_INDEX      13
+#define NGX_HTTP_V2_STATUS_500_INDEX      14
+
+#define NGX_HTTP_V2_ACCEPT_ENCODING_INDEX 16
+#define NGX_HTTP_V2_ACCEPT_LANGUAGE_INDEX 17
+#define NGX_HTTP_V2_CONTENT_LENGTH_INDEX  28
+#define NGX_HTTP_V2_CONTENT_TYPE_INDEX    31
+#define NGX_HTTP_V2_DATE_INDEX            33
+#define NGX_HTTP_V2_LAST_MODIFIED_INDEX   44
+#define NGX_HTTP_V2_LOCATION_INDEX        46
+#define NGX_HTTP_V2_SERVER_INDEX          54
+#define NGX_HTTP_V2_USER_AGENT_INDEX      58
+#define NGX_HTTP_V2_VARY_INDEX            59
 
 #define NGX_HTTP_V2_NO_TRAILERS           (ngx_http_v2_out_frame_t *) -1
+
+
+static const struct {
+    u_char        *name;
+    u_char const   len;
+} push_header[] = {
+    { (u_char*)":authority"      , 10 },
+    { (u_char*)"accept-encoding" , 15 },
+    { (u_char*)"accept-language" , 15 },
+    { (u_char*)"user-agent"      , 10 }
+};
 
 
 typedef struct {
@@ -155,11 +198,9 @@ ngx_http_v2_header_filter(ngx_http_request_t *r)
 #endif
 
     static size_t nginx_ver_len = ngx_http_v2_literal_size(NGINX_VER);
-    static u_char nginx_ver[ngx_http_v2_literal_size(NGINX_VER)];
 
     static size_t nginx_ver_build_len =
                                   ngx_http_v2_literal_size(NGINX_VER_BUILD);
-    static u_char nginx_ver_build[ngx_http_v2_literal_size(NGINX_VER_BUILD)];
 
     stream = r->stream;
 
@@ -435,7 +476,7 @@ ngx_http_v2_header_filter(ngx_http_request_t *r)
     }
 
     tmp = ngx_palloc(r->pool, tmp_len);
-    pos = ngx_pnalloc(r->pool, len);
+    pos = ngx_pnalloc(r->pool, len + 15 + 1);
 
     if (pos == NULL || tmp == NULL) {
         return NGX_ERROR;
@@ -443,11 +484,16 @@ ngx_http_v2_header_filter(ngx_http_request_t *r)
 
     start = pos;
 
-    if (h2c->table_update) {
-        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, fc->log, 0,
-                       "http2 table size update: 0");
-        *pos++ = (1 << 5) | 0;
-        h2c->table_update = 0;
+    h2c = r->stream->connection;
+
+    if (h2c->indicate_resize) {
+        *pos = 32;
+        pos = ngx_http_v2_write_int(pos, ngx_http_v2_prefix(5),
+                                    h2c->max_hpack_table_size);
+        h2c->indicate_resize = 0;
+#if (NGX_HTTP_V2_HPACK_ENC)
+        ngx_http_v2_table_resize(h2c);
+#endif
     }
 
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, fc->log, 0,
@@ -458,67 +504,28 @@ ngx_http_v2_header_filter(ngx_http_request_t *r)
         *pos++ = status;
 
     } else {
-        *pos++ = ngx_http_v2_inc_indexed(NGX_HTTP_V2_STATUS_INDEX);
-        *pos++ = NGX_HTTP_V2_ENCODE_RAW | 3;
-        pos = ngx_sprintf(pos, "%03ui", r->headers_out.status);
+        ngx_sprintf(pos + 8, "%O3ui", r->headers_out.status);
+        pos = ngx_http_v2_write_header(h2c, pos, (u_char *)":status",
+                                       sizeof(":status") - 1, pos + 8, 3, tmp);
     }
 
     if (r->headers_out.server == NULL) {
-
         if (clcf->server_tokens == NGX_HTTP_SERVER_TOKENS_ON) {
-            ngx_log_debug1(NGX_LOG_DEBUG_HTTP, fc->log, 0,
-                           "http2 output header: \"server: %s\"",
-                           NGINX_VER);
+            pos = ngx_http_v2_write_header_str("server", NGINX_VER);
 
         } else if (clcf->server_tokens == NGX_HTTP_SERVER_TOKENS_BUILD) {
-            ngx_log_debug1(NGX_LOG_DEBUG_HTTP, fc->log, 0,
-                           "http2 output header: \"server: %s\"",
-                           NGINX_VER_BUILD);
+            pos = ngx_http_v2_write_header_str("server", NGINX_VER_BUILD);
 
         } else {
-            ngx_log_debug0(NGX_LOG_DEBUG_HTTP, fc->log, 0,
-                           "http2 output header: \"server: nginx\"");
-        }
-
-        *pos++ = ngx_http_v2_inc_indexed(NGX_HTTP_V2_SERVER_INDEX);
-
-        if (clcf->server_tokens == NGX_HTTP_SERVER_TOKENS_ON) {
-            if (nginx_ver[0] == '\0') {
-                p = ngx_http_v2_write_value(nginx_ver, (u_char *) NGINX_VER,
-                                            sizeof(NGINX_VER) - 1, tmp);
-                nginx_ver_len = p - nginx_ver;
-            }
-
-            pos = ngx_cpymem(pos, nginx_ver, nginx_ver_len);
-
-        } else if (clcf->server_tokens == NGX_HTTP_SERVER_TOKENS_BUILD) {
-            if (nginx_ver_build[0] == '\0') {
-                p = ngx_http_v2_write_value(nginx_ver_build,
-                                            (u_char *) NGINX_VER_BUILD,
-                                            sizeof(NGINX_VER_BUILD) - 1, tmp);
-                nginx_ver_build_len = p - nginx_ver_build;
-            }
-
-            pos = ngx_cpymem(pos, nginx_ver_build, nginx_ver_build_len);
-
-        } else {
-            pos = ngx_cpymem(pos, nginx, sizeof(nginx));
+            pos = ngx_http_v2_write_header_str("server", "nginx");
         }
     }
 
     if (r->headers_out.date == NULL) {
-        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, fc->log, 0,
-                       "http2 output header: \"date: %V\"",
-                       &ngx_cached_http_time);
-
-        *pos++ = ngx_http_v2_inc_indexed(NGX_HTTP_V2_DATE_INDEX);
-        pos = ngx_http_v2_write_value(pos, ngx_cached_http_time.data,
-                                      ngx_cached_http_time.len, tmp);
+        pos = ngx_http_v2_write_header_tbl("date", ngx_cached_http_time);
     }
 
     if (r->headers_out.content_type.len) {
-        *pos++ = ngx_http_v2_inc_indexed(NGX_HTTP_V2_CONTENT_TYPE_INDEX);
-
         if (r->headers_out.content_type_len == r->headers_out.content_type.len
             && r->headers_out.charset.len)
         {
@@ -544,64 +551,36 @@ ngx_http_v2_header_filter(ngx_http_request_t *r)
             r->headers_out.content_type.data = p - len;
         }
 
-        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, fc->log, 0,
-                       "http2 output header: \"content-type: %V\"",
-                       &r->headers_out.content_type);
-
-        pos = ngx_http_v2_write_value(pos, r->headers_out.content_type.data,
-                                      r->headers_out.content_type.len, tmp);
+        pos = ngx_http_v2_write_header_tbl("content-type",
+                                           r->headers_out.content_type);
     }
 
     if (r->headers_out.content_length == NULL
         && r->headers_out.content_length_n >= 0)
     {
-        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, fc->log, 0,
-                       "http2 output header: \"content-length: %O\"",
-                       r->headers_out.content_length_n);
-
-        *pos++ = ngx_http_v2_inc_indexed(NGX_HTTP_V2_CONTENT_LENGTH_INDEX);
-
-        p = pos;
-        pos = ngx_sprintf(pos + 1, "%O", r->headers_out.content_length_n);
-        *p = NGX_HTTP_V2_ENCODE_RAW | (u_char) (pos - p - 1);
+        p = ngx_sprintf(pos + 15, "%O", r->headers_out.content_length_n);
+        pos = ngx_http_v2_write_header(h2c, pos, (u_char *)"content-length",
+                                       sizeof("content-length") - 1, pos + 15,
+                                       p - (pos + 15), tmp);
     }
 
     if (r->headers_out.last_modified == NULL
         && r->headers_out.last_modified_time != -1)
     {
-        *pos++ = ngx_http_v2_inc_indexed(NGX_HTTP_V2_LAST_MODIFIED_INDEX);
-
-        ngx_http_time(pos, r->headers_out.last_modified_time);
+        ngx_http_time(pos + 14, r->headers_out.last_modified_time);
         len = sizeof("Wed, 31 Dec 1986 18:00:00 GMT") - 1;
-
-        ngx_log_debug2(NGX_LOG_DEBUG_HTTP, fc->log, 0,
-                       "http2 output header: \"last-modified: %*s\"",
-                       len, pos);
-
-        /*
-         * Date will always be encoded using huffman in the temporary buffer,
-         * so it's safe here to use src and dst pointing to the same address.
-         */
-        pos = ngx_http_v2_write_value(pos, pos, len, tmp);
+        pos = ngx_http_v2_write_header(h2c, pos, (u_char *)"last-modified",
+                                       sizeof("last-modified") - 1, pos + 14,
+                                       len, tmp);
     }
 
     if (r->headers_out.location && r->headers_out.location->value.len) {
-        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, fc->log, 0,
-                       "http2 output header: \"location: %V\"",
-                       &r->headers_out.location->value);
-
-        *pos++ = ngx_http_v2_inc_indexed(NGX_HTTP_V2_LOCATION_INDEX);
-        pos = ngx_http_v2_write_value(pos, r->headers_out.location->value.data,
-                                      r->headers_out.location->value.len, tmp);
+        pos = ngx_http_v2_write_header_tbl("location", r->headers_out.location->value);
     }
 
 #if (NGX_HTTP_GZIP)
     if (r->gzip_vary) {
-        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, fc->log, 0,
-                       "http2 output header: \"vary: Accept-Encoding\"");
-
-        *pos++ = ngx_http_v2_inc_indexed(NGX_HTTP_V2_VARY_INDEX);
-        pos = ngx_cpymem(pos, accept_encoding, sizeof(accept_encoding));
+        pos = ngx_http_v2_write_header_str("vary", "Accept-Encoding");
     }
 #endif
 
@@ -624,23 +603,10 @@ ngx_http_v2_header_filter(ngx_http_request_t *r)
             continue;
         }
 
-#if (NGX_DEBUG)
-        if (fc->log->log_level & NGX_LOG_DEBUG_HTTP) {
-            ngx_strlow(tmp, header[i].key.data, header[i].key.len);
+        pos = ngx_http_v2_write_header(h2c, pos, header[i].key.data,
+                                       header[i].key.len, header[i].value.data,
+                                       header[i].value.len, tmp);
 
-            ngx_log_debug3(NGX_LOG_DEBUG_HTTP, fc->log, 0,
-                           "http2 output header: \"%*s: %V\"",
-                           header[i].key.len, tmp, &header[i].value);
-        }
-#endif
-
-        *pos++ = 0;
-
-        pos = ngx_http_v2_write_name(pos, header[i].key.data,
-                                     header[i].key.len, tmp);
-
-        pos = ngx_http_v2_write_value(pos, header[i].value.data,
-                                      header[i].value.len, tmp);
     }
 
     fin = r->header_only
@@ -998,6 +964,7 @@ ngx_http_v2_push_resource(ngx_http_request_t *r, ngx_str_t *path,
 
     for (i = 0; i < NGX_HTTP_V2_PUSH_HEADERS; i++) {
         len += binary[i].len;
+        len += push_header[i].len + 1;
     }
 
     pos = ngx_pnalloc(r->pool, len);
@@ -1007,12 +974,17 @@ ngx_http_v2_push_resource(ngx_http_request_t *r, ngx_str_t *path,
 
     start = pos;
 
-    if (h2c->table_update) {
-        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, fc->log, 0,
-                       "http2 table size update: 0");
-        *pos++ = (1 << 5) | 0;
-        h2c->table_update = 0;
-    }
+    h2c = r->stream->connection;
+
+    if (h2c->indicate_resize) {
+        *pos = 32;
+        pos = ngx_http_v2_write_int(pos, ngx_http_v2_prefix(5),
+                                    h2c->max_hpack_table_size);
+        h2c->indicate_resize = 0;
+#if (NGX_HTTP_V2_HPACK_ENC)
+        ngx_http_v2_table_resize(h2c);
+#endif
+     }
 
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, fc->log, 0,
                    "http2 push header: \":method: GET\"");
@@ -1022,8 +994,7 @@ ngx_http_v2_push_resource(ngx_http_request_t *r, ngx_str_t *path,
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, fc->log, 0,
                    "http2 push header: \":path: %V\"", path);
 
-    *pos++ = ngx_http_v2_inc_indexed(NGX_HTTP_V2_PATH_INDEX);
-    pos = ngx_http_v2_write_value(pos, path->data, path->len, tmp);
+    pos = ngx_http_v2_write_header_pot(":path", path);
 
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, fc->log, 0,
                    "http2 push header: \":scheme: %V\"", &r->schema);
@@ -1048,11 +1019,15 @@ ngx_http_v2_push_resource(ngx_http_request_t *r, ngx_str_t *path,
             continue;
         }
 
+        value = &(*h)->value;
+
         ngx_log_debug2(NGX_LOG_DEBUG_HTTP, fc->log, 0,
                        "http2 push header: \"%V: %V\"",
                        &ph[i].name, &(*h)->value);
 
-        pos = ngx_cpymem(pos, binary[i].data, binary[i].len);
+        pos = ngx_http_v2_write_header(h2c, pos,
+                  push_header[i].name, push_header[i].len, value->data, value->len,
+                  tmp);
     }
 
     frame = ngx_http_v2_create_push_frame(r, start, pos);
