@@ -1876,8 +1876,50 @@ ngx_int_t
 ngx_ssl_stapling(ngx_conf_t *cf, ngx_ssl_t *ssl, ngx_str_t *file,
     ngx_str_t *responder, ngx_uint_t verify)
 {
+#ifdef BORINGSSL_MAKE_DELETER
+    ngx_log_error(NGX_LOG_WARN, ssl->log, 0,
+                  "using boringssl, currently only \"ssl_stapling_file\" is supported. use it as your own risk");
+
+    BIO            *bio;
+    int             len;
+    u_char          buf[1024];
+
+    if (ngx_conf_full_name(cf->cycle, file, 1) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    bio = BIO_new_file((char *) file->data, "r");
+    if (bio == NULL) {
+        ngx_ssl_error(NGX_LOG_EMERG, ssl->log, 0,
+                      "BIO_new_file(\"%s\") failed", file->data);
+        return NGX_ERROR;
+    }
+
+    len = BIO_read(bio, buf, sizeof(buf) / sizeof(u_char));
+    BIO_free(bio);
+    bio = NULL;
+
+    if (len <= 0) {
+        ngx_ssl_error(NGX_LOG_EMERG, ssl->log, 0,
+                      "Read OCSP response file \"%s\" failed: %d", file->data, len);
+        return NGX_ERROR;
+    }
+
+    if (len >= 1000) {
+        ngx_ssl_error(NGX_LOG_EMERG, ssl->log, 0,
+                      "Unexpected OCSP response file length: %d", len);
+        return NGX_ERROR;
+    }
+
+    if (!SSL_CTX_set_ocsp_response(ssl->ctx, buf, len)) {
+        ngx_ssl_error(NGX_LOG_EMERG, ssl->log, 0,
+                      "SSL_CTX_set_ocsp_response(ssl->ctx, buf, %d) failed", len);
+        return NGX_ERROR;
+    }
+#else
     ngx_log_error(NGX_LOG_WARN, ssl->log, 0,
                   "\"ssl_stapling\" ignored, not supported");
+#endif
 
     return NGX_OK;
 }
