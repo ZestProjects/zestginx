@@ -94,8 +94,7 @@ extern ssize_t sendfile(int s, int fd, int32_t *offset, size_t size);
 #endif
 #include <sys/syscall.h>
 #if (NGX_HAVE_FILE_AIO)
-#include <linux/aio_abi.h>
-typedef struct iocb  ngx_aiocb_t;
+#include <liburing.h>
 #endif
 
 

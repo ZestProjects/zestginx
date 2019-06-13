@@ -160,7 +160,6 @@ struct ngx_event_aio_s {
     size_t                     nbytes;
 #endif
 
-    ngx_aiocb_t                aiocb;
     ngx_event_t                event;
 };
 
