@@ -49,11 +49,13 @@ END
         cat << END                                            >> $NGX_MAKEFILE
 
 $OPENSSL/.openssl/include/openssl/ssl.h:	$NGX_MAKEFILE
-	cd $OPENSSL \\
-	&& if [ -f Makefile ]; then \$(MAKE) clean; fi \\
-	&& ./config --prefix=$ngx_prefix no-shared no-threads $OPENSSL_OPT \\
-	&& \$(MAKE) \\
-	&& \$(MAKE) install_sw LIBDIR=lib
+	mkdir -p $OPENSSL/build $OPENSSL/.openssl/lib $OPENSSL/.openssl/include/openssl \\
+	&& cd $OPENSSL/build \\
+	&& cmake -DCMAKE_C_FLAGS="$OPENSSL_OPT" -DCMAKE_CXX_FLAGS="$OPENSSL_OPT" .. \\
+	&& \$(MAKE) VERBOSE=1 \\
+	&& cd .. \\
+	&& cp -r include/openssl/*.h .openssl/include/openssl \\
+	&& cp build/ssl/libssl.a build/crypto/libcrypto.a .openssl/lib
 
 END
 

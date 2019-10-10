@@ -11,6 +11,10 @@ if [ $OPENSSL != NONE -a $OPENSSL != NO -a $OPENSSL != YES ]; then
     . auto/lib/openssl/make
 fi
 
+if [ $QUICHE != NONE -a $QUICHE != NO -a $QUICHE != YES ]; then
+    . auto/lib/quiche/make
+fi
+
 if [ $ZLIB != NONE -a $ZLIB != NO -a $ZLIB != YES ]; then
     . auto/lib/zlib/make
 fi

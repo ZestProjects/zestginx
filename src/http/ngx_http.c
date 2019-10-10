@@ -1141,6 +1141,7 @@ ngx_int_t
 ngx_http_add_listen(ngx_conf_t *cf, ngx_http_core_srv_conf_t *cscf,
     ngx_http_listen_opt_t *lsopt)
 {
+    int                         t;
     in_port_t                   p;
     ngx_uint_t                  i;
     struct sockaddr            *sa;
@@ -1159,11 +1160,13 @@ ngx_http_add_listen(ngx_conf_t *cf, ngx_http_core_srv_conf_t *cscf,
 
     sa = lsopt->sockaddr;
     p = ngx_inet_get_port(sa);
+    t = lsopt->quic ? SOCK_DGRAM : SOCK_STREAM;
 
     port = cmcf->ports->elts;
     for (i = 0; i < cmcf->ports->nelts; i++) {
 
-        if (p != port[i].port || sa->sa_family != port[i].family) {
+        if (p != port[i].port || sa->sa_family != port[i].family
+             || t != port[i].type) {
             continue;
         }
 
@@ -1182,6 +1185,7 @@ ngx_http_add_listen(ngx_conf_t *cf, ngx_http_core_srv_conf_t *cscf,
     port->family = sa->sa_family;
     port->port = p;
     port->addrs.elts = NULL;
+    port->type = t;
 
     return ngx_http_add_address(cf, cscf, port, lsopt);
 }
@@ -1198,6 +1202,9 @@ ngx_http_add_addresses(ngx_conf_t *cf, ngx_http_core_srv_conf_t *cscf,
 #endif
 #if (NGX_HTTP_V2)
     ngx_uint_t             http2;
+#endif
+#if (NGX_HTTP_V3)
+    ngx_uint_t             quic;
 #endif
 
     /*
@@ -1234,6 +1241,9 @@ ngx_http_add_addresses(ngx_conf_t *cf, ngx_http_core_srv_conf_t *cscf,
 #if (NGX_HTTP_V2)
         http2 = lsopt->http2 || addr[i].opt.http2;
 #endif
+#if (NGX_HTTP_V3)
+        quic = lsopt->quic || addr[i].opt.quic;
+#endif
 
         if (lsopt->set) {
 
@@ -1269,6 +1279,9 @@ ngx_http_add_addresses(ngx_conf_t *cf, ngx_http_core_srv_conf_t *cscf,
 #endif
 #if (NGX_HTTP_V2)
         addr[i].opt.http2 = http2;
+#endif
+#if (NGX_HTTP_V3)
+        addr[i].opt.quic = quic;
 #endif
 
         return NGX_OK;
@@ -1688,6 +1701,12 @@ ngx_http_init_listening(ngx_conf_t *cf, ngx_http_conf_port_t *port)
             break;
         }
 
+#if (NGX_HTTP_V3)
+        if (addr[i].opt.quic) {
+            ls->type = SOCK_DGRAM;
+        }
+#endif
+
         addr++;
         last--;
     }
@@ -1770,6 +1789,12 @@ ngx_http_add_listening(ngx_conf_t *cf, ngx_http_conf_addr_t *addr)
     ls->reuseport = addr->opt.reuseport;
 #endif
 
+#if (NGX_HTTP_V3)
+    ls->quic = addr->opt.quic;
+
+    ls->wildcard = addr->opt.wildcard;
+#endif
+
     return ls;
 }
 
@@ -1803,6 +1828,9 @@ ngx_http_add_addrs(ngx_conf_t *cf, ngx_http_port_t *hport,
         addrs[i].conf.http2 = addr[i].opt.http2;
 #endif
         addrs[i].conf.proxy_protocol = addr[i].opt.proxy_protocol;
+#if (NGX_HTTP_V3)
+        addrs[i].conf.quic = addr[i].opt.quic;
+#endif
 
         if (addr[i].hash.buckets == NULL
             && (addr[i].wc_head == NULL
@@ -1868,6 +1896,9 @@ ngx_http_add_addrs6(ngx_conf_t *cf, ngx_http_port_t *hport,
         addrs6[i].conf.http2 = addr[i].opt.http2;
 #endif
         addrs6[i].conf.proxy_protocol = addr[i].opt.proxy_protocol;
+#if (NGX_HTTP_V3)
+        addrs6[i].conf.quic = addr[i].opt.quic;
+#endif
 
         if (addr[i].hash.buckets == NULL
             && (addr[i].wc_head == NULL

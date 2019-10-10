@@ -1,0 +1,22 @@
+
+# Copyright (C) Cloudflare, Inc.
+
+
+# Default is release build
+QUICHE_BUILD_FLAGS="--release --no-default-features"
+QUICHE_BUILD_TARGET="release"
+
+if [ $NGX_DEBUG = YES ]; then
+    QUICHE_BUILD_FLAGS="--no-default-features"
+    QUICHE_BUILD_TARGET="debug"
+fi
+
+
+cat << END                                                    >> $NGX_MAKEFILE
+
+$QUICHE/target/$QUICHE_BUILD_TARGET/libquiche.a: \\
+		$OPENSSL/.openssl/include/openssl/ssl.h \\
+		$NGX_MAKEFILE
+	cd $QUICHE && cargo build $QUICHE_BUILD_FLAGS
+
+END

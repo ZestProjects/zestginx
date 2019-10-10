@@ -64,6 +64,10 @@ static void ngx_http_ssl_handshake(ngx_event_t *rev);
 static void ngx_http_ssl_handshake_handler(ngx_connection_t *c);
 #endif
 
+#if (NGX_HTTP_V3)
+static void ngx_http_quic_handshake(ngx_event_t *rev);
+#endif
+
 
 static char *ngx_http_client_errors[] = {
 
@@ -348,6 +352,18 @@ ngx_http_init_connection(ngx_connection_t *c)
         hc->proxy_protocol = 1;
         c->log->action = "reading PROXY protocol";
     }
+
+#if (NGX_HTTP_V3)
+    if (hc->addr_conf->quic) {
+        hc->quic = 1;
+
+        /* We already have a UDP packet in the connection buffer, so we don't
+         * need to wait for another read event to kick-off the handshake. */
+        ngx_add_timer(rev, c->listening->post_accept_timeout);
+        ngx_http_quic_handshake(rev);
+        return;
+    }
+#endif
 
     if (rev->ready) {
         /* the deferred accept(), iocp */
@@ -797,7 +813,7 @@ ngx_http_ssl_handshake_handler(ngx_connection_t *c)
 
         c->ssl->no_wait_shutdown = 1;
 
-#if (NGX_HTTP_V2                                                              \
+#if ((NGX_HTTP_V2 || NGX_HTTP_V3)                                             \
      && (defined TLSEXT_TYPE_application_layer_protocol_negotiation           \
          || defined TLSEXT_TYPE_next_proto_neg))
         {
@@ -807,7 +823,7 @@ ngx_http_ssl_handshake_handler(ngx_connection_t *c)
 
         hc = c->data;
 
-        if (hc->addr_conf->http2) {
+        if (hc->addr_conf->http2 || hc->addr_conf->quic) {
 
 #ifdef TLSEXT_TYPE_application_layer_protocol_negotiation
             SSL_get0_alpn_selected(c->ssl->connection, &data, &len);
@@ -822,11 +838,29 @@ ngx_http_ssl_handshake_handler(ngx_connection_t *c)
             SSL_get0_next_proto_negotiated(c->ssl->connection, &data, &len);
 #endif
 
+        }
+
+#if (NGX_HTTP_V2)
+        if (hc->addr_conf->http2) {
             if (len == 2 && data[0] == 'h' && data[1] == '2') {
                 ngx_http_v2_init(c->read);
                 return;
             }
         }
+#endif
+
+#if (NGX_HTTP_V3)
+        if (hc->addr_conf->quic) {
+            if (len >= 2 && data[0] == 'h' && data[1] == '3') {
+                ngx_http_v3_init(c->read);
+                return;
+            }
+
+            ngx_http_close_connection(c);
+            return;
+        }
+#endif
+
         }
 #endif
 
@@ -1030,6 +1064,68 @@ failed:
 }
 
 #endif
+
+#endif
+
+#if (NGX_HTTP_V3)
+
+static void
+ngx_http_quic_handshake(ngx_event_t *rev)
+{
+    ngx_int_t                  rc;
+    ngx_connection_t          *c;
+    ngx_http_connection_t     *hc;
+    ngx_http_v3_srv_conf_t    *qscf;
+    ngx_http_ssl_srv_conf_t   *sscf;
+
+    c = rev->data;
+    hc = c->data;
+
+    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, rev->log, 0,
+                   "http check quic handshake");
+
+    if (rev->timedout) {
+        ngx_log_error(NGX_LOG_INFO, c->log, NGX_ETIMEDOUT, "client timed out");
+        ngx_http_close_connection(c);
+        return;
+    }
+
+    if (c->close) {
+        ngx_http_close_connection(c);
+        return;
+    }
+
+    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, rev->log, 0, "https quic handshake");
+
+    sscf = ngx_http_get_module_srv_conf(hc->conf_ctx,
+                                        ngx_http_ssl_module);
+
+    if (ngx_ssl_create_connection(&sscf->ssl, c, 0) != NGX_OK) {
+        ngx_http_close_connection(c);
+        return;
+    }
+
+    qscf = ngx_http_get_module_srv_conf(hc->conf_ctx, ngx_http_v3_module);
+
+    if (ngx_quic_create_connection(&qscf->quic, c) != NGX_OK) {
+        ngx_http_close_connection(c);
+        return;
+    }
+
+    rc = ngx_quic_handshake(c);
+
+    if (rc == NGX_AGAIN) {
+
+        if (!rev->timer_set) {
+            ngx_add_timer(rev, c->listening->post_accept_timeout);
+        }
+
+        c->ssl->handler = ngx_http_ssl_handshake_handler;
+        return;
+    }
+
+    ngx_http_ssl_handshake_handler(c);
+}
 
 #endif
 
@@ -2680,6 +2776,13 @@ ngx_http_finalize_connection(ngx_http_request_t *r)
     }
 #endif
 
+#if (NGX_HTTP_V3)
+    if (r->qstream) {
+        ngx_http_close_request(r, 0);
+        return;
+    }
+#endif
+
     clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
 
     if (r->main->count != 1) {
@@ -2879,6 +2982,19 @@ ngx_http_test_reading(ngx_http_request_t *r)
 #if (NGX_HTTP_V2)
 
     if (r->stream) {
+        if (c->error) {
+            err = 0;
+            goto closed;
+        }
+
+        return;
+    }
+
+#endif
+
+#if (NGX_HTTP_V3)
+
+    if (r->qstream) {
         if (c->error) {
             err = 0;
             goto closed;
@@ -3556,7 +3672,15 @@ ngx_http_close_request(ngx_http_request_t *r, ngx_int_t rc)
     }
 #endif
 
+#if (NGX_HTTP_V3)
+    if (r->qstream) {
+        ngx_http_v3_close_stream(r->qstream, rc);
+        return;
+    }
+#endif
+
     ngx_http_free_request(r, rc);
+
     ngx_http_close_connection(c);
 }
 
@@ -3676,6 +3800,21 @@ ngx_http_close_connection(ngx_connection_t *c)
 
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, c->log, 0,
                    "close http connection: %d", c->fd);
+
+#if (NGX_HTTP_V3)
+
+    if (c->quic) {
+        if (ngx_quic_shutdown(c) == NGX_AGAIN) {
+            c->quic->handler = ngx_http_close_connection;
+            return;
+        }
+
+        if (c->destroyed) {
+            return;
+        }
+    }
+
+#endif
 
 #if (NGX_HTTP_SSL)
 

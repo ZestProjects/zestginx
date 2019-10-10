@@ -82,6 +82,7 @@ typedef struct {
     unsigned                   reuseport:1;
     unsigned                   so_keepalive:2;
     unsigned                   proxy_protocol:1;
+    unsigned                   quic:1;
 
     int                        backlog;
     int                        rcvbuf;
@@ -238,6 +239,7 @@ struct ngx_http_addr_conf_s {
     unsigned                   ssl:1;
     unsigned                   http2:1;
     unsigned                   proxy_protocol:1;
+    unsigned                   quic:1;
 };
 
 
@@ -268,6 +270,7 @@ typedef struct {
     ngx_int_t                  family;
     in_port_t                  port;
     ngx_array_t                addrs;     /* array of ngx_http_conf_addr_t */
+    ngx_int_t                  type;
 } ngx_http_conf_port_t;
 
 

@@ -276,6 +276,14 @@ ngx_event_recvmsg(ngx_event_t *ev)
         (void) ngx_atomic_fetch_add(ngx_stat_accepted, 1);
 #endif
 
+#if (NGX_QUIC)
+        if (ls->quic) {
+            if (ngx_quic_validate_initial(ev, buffer, n) != NGX_OK) {
+                goto next;
+            }
+        }
+#endif
+
         ngx_accept_disabled = ngx_cycle->connection_n / 8
                               - ngx_cycle->free_connection_n;
 
