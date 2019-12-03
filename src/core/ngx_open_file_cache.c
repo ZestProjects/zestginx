@@ -869,11 +869,11 @@ ngx_open_and_stat_file(ngx_str_t *name, ngx_open_file_info_t *of,
     if (!of->log) {
 
         /*
-         * Use non-blocking open() not to hang on FIFO files, etc.
-         * This flag has no effect on a regular files.
+         * Differs from plain read, IORING_OP_READV with O_NONBLOCK
+         * will return -EAGAIN if the operation may block.
          */
 
-        fd = ngx_open_file_wrapper(name, of, NGX_FILE_RDONLY|NGX_FILE_NONBLOCK,
+        fd = ngx_open_file_wrapper(name, of, NGX_FILE_RDONLY,
                                    NGX_FILE_OPEN, 0, log);
 
     } else {

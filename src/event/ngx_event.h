@@ -160,6 +160,9 @@ struct ngx_event_aio_s {
     size_t                     nbytes;
 #endif
 
+    /* Make sure that this iov has the same lifecycle with its associated aio event */
+    struct iovec               iov;
+
     ngx_event_t                event;
 };
 

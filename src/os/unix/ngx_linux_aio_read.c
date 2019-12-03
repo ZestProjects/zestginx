@@ -47,7 +47,6 @@ ngx_file_aio_read(ngx_file_t *file, u_char *buf, size_t size, off_t offset,
     ngx_event_t          *ev;
     ngx_event_aio_t      *aio;
     struct io_uring_sqe  *sqe;
-    struct iovec          iov;
 
     if (!ngx_file_aio) {
         return ngx_read_file(file, buf, size, offset);
@@ -96,9 +95,10 @@ ngx_file_aio_read(ngx_file_t *file, u_char *buf, size_t size, off_t offset,
         return ngx_read_file(file, buf, size, offset);
     }
 
-    iov.iov_base = buf;
-    iov.iov_len = size;
-    io_uring_prep_readv(sqe, file->fd, &iov, 1, offset);
+    /* We must store iov into heap to prevent kernel from returning -EFAULT */
+    aio->iov.iov_base = buf;
+    aio->iov.iov_len = size;
+    io_uring_prep_readv(sqe, file->fd, &aio->iov, 1, offset);
     io_uring_sqe_set_data(sqe, ev);
 
 
