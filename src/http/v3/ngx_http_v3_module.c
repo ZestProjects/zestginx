@@ -201,7 +201,7 @@ ngx_http_v3_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
         return NGX_CONF_ERROR;
     }
 
-    quiche_config_set_idle_timeout(conf->quic.config, conf->idle_timeout);
+    quiche_config_set_max_idle_timeout(conf->quic.config, conf->idle_timeout);
 
     quiche_config_set_initial_max_data(conf->quic.config, conf->max_data);
 
