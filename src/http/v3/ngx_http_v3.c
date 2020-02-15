@@ -1775,6 +1775,11 @@ ngx_http_v3_send_response(ngx_http_request_t *r)
 #if (NGX_HTTP_GZIP)
     /* Generate Vary header. */
     if (r->gzip_vary) {
+        h = ngx_array_push(headers);
+        if (h == NULL) {
+            return NGX_ERROR;
+        }
+
         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, fc->log, 0,
                        "http3 output header: \"vary: Accept-Encoding\"");
 
