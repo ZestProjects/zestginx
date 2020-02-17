@@ -1262,7 +1262,7 @@ ngx_http_v3_process_request_body(ngx_http_request_t *r, ngx_uint_t do_read,
         len = quiche_h3_recv_body(h3c->h3, c->quic->conn, r->qstream->id,
                                   buf->last, buf->end - buf->last);
 
-        if (len == QUICHE_ERR_DONE) {
+        if (len == QUICHE_H3_ERR_DONE) {
             return NGX_AGAIN;
         }
 
@@ -1870,7 +1870,7 @@ ngx_http_v3_stream_do_send(ngx_connection_t *fc, ngx_buf_t *b, ngx_int_t fin)
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, stream->connection->connection->log, 0,
                    "http3 stream written %z bytes", n);
 
-    if (n == QUICHE_ERR_DONE) {
+    if (n == QUICHE_H3_ERR_DONE) {
         return NGX_AGAIN;
     }
 
