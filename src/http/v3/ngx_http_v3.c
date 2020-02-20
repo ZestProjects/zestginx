@@ -381,6 +381,10 @@ ngx_http_v3_process_blocked_streams(ngx_http_v3_connection_t *h3c)
         wev->active = 0;
         wev->ready = 1;
 
+        if (!stream->headers_sent) {
+            ngx_http_v3_send_response(stream->request);
+        }
+
         if (!wev->delayed) {
             wev->handler(wev);
         }
@@ -1509,6 +1513,7 @@ ngx_http_v3_read_unbuffered_request_body(ngx_http_request_t *r)
 ngx_int_t
 ngx_http_v3_send_response(ngx_http_request_t *r)
 {
+    int                        rc;
     u_char                    *tmp;
     u_char                     status[3], content_len[NGX_OFF_T_LEN],
                                last_modified[sizeof("Wed, 31 Dec 1986 18:00:00 GMT") - 1],
@@ -1525,8 +1530,8 @@ ngx_http_v3_send_response(ngx_http_request_t *r)
     ngx_http_core_loc_conf_t  *clcf;
     ngx_http_core_srv_conf_t  *cscf;
 
-    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                   "http3 send response");
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "http3 send response stream %ui", r->qstream->id);
 
     fc = r->connection;
 
@@ -1834,15 +1839,30 @@ ngx_http_v3_send_response(ngx_http_request_t *r)
     fin = r->header_only
           || (r->headers_out.content_length_n == 0 && !r->expect_trailers);
 
-    if (quiche_h3_send_response(h3c->h3, c->quic->conn, r->qstream->id,
-                                headers->elts, headers->nelts, fin)) {
-        ngx_array_destroy(headers);
+    rc = quiche_h3_send_response(h3c->h3, c->quic->conn, r->qstream->id,
+                                headers->elts, headers->nelts, fin);
+
+    ngx_array_destroy(headers);
+
+    if (rc == QUICHE_H3_ERR_STREAM_BLOCKED) {
+        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, c->log, 0,
+                       "http3 stream blocked %ui", r->qstream->id);
+
+        r->qstream->blocked = 1;
+
+        fc->write->active = 1;
+        fc->write->ready = 0;
+
+        return NGX_AGAIN;
+    }
+
+    if (rc != NGX_OK) {
         return NGX_ERROR;
     }
 
-    ngx_post_event(c->write, &ngx_posted_events);
+    r->qstream->headers_sent = 1;
 
-    ngx_array_destroy(headers);
+    ngx_post_event(c->write, &ngx_posted_events);
 
     return NGX_OK;
 }
@@ -1868,6 +1888,10 @@ ngx_http_v3_stream_do_send(ngx_connection_t *fc, ngx_buf_t *b, ngx_int_t fin)
     ngx_log_debug3(NGX_LOG_DEBUG_EVENT, fc->log, 0,
                    "http3 stream %uz to write %uz bytes, fin=%d",
                    stream->id, buf_len, fin);
+
+    if (!stream->headers_sent) {
+        return NGX_AGAIN;
+    }
 
     n = quiche_h3_send_body(h3c->h3, c->quic->conn, r->qstream->id,
                             buf, buf_len, fin);

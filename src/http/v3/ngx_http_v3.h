@@ -50,6 +50,7 @@ struct ngx_http_v3_stream_s {
 
     ngx_http_v3_stream_t      *next;
 
+    ngx_uint_t                 headers_sent:1;
     ngx_uint_t                 in_closed:1;
     ngx_uint_t                 out_closed:1;
     ngx_uint_t                 skip_data:1;
