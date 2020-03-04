@@ -199,8 +199,6 @@ ngx_quic_handshake(ngx_connection_t *c)
     size_t    buf_len;
     ssize_t   done;
 
-    c->log->action = "processing QUIC connection";
-
     /* Process the client's Initial packet, which was saved into c->buffer by
      * ngx_event_recvmsg(). */
     buf = c->buffer->pos;
@@ -235,6 +233,8 @@ ngx_quic_read_handler(ngx_event_t *rev)
     ngx_connection_t  *c;
 
     c = rev->data;
+
+    c->log->action = "reading QUIC packets";
 
     ngx_log_debug0(NGX_LOG_DEBUG_EVENT, c->log, 0, "quic read handler");
 
@@ -305,6 +305,8 @@ ngx_quic_write_handler(ngx_event_t *wev)
     static uint8_t      out[MAX_DATAGRAM_SIZE];
 
     c = wev->data;
+
+    c->log->action = "writing QUIC packets";
 
     ngx_log_debug0(NGX_LOG_DEBUG_EVENT, c->log, 0, "quic write handler");
 

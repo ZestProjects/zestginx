@@ -356,6 +356,7 @@ ngx_http_init_connection(ngx_connection_t *c)
 #if (NGX_HTTP_V3)
     if (hc->addr_conf->quic) {
         hc->quic = 1;
+        c->log->action = "QUIC handshaking";
 
         /* We already have a UDP packet in the connection buffer, so we don't
          * need to wait for another read event to kick-off the handshake. */
