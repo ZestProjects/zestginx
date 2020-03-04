@@ -1538,6 +1538,39 @@ ngx_http_v3_send_response(ngx_http_request_t *r)
     h3c = r->qstream->connection;
     c = h3c->connection;
 
+    if (r->method == NGX_HTTP_HEAD) {
+        r->header_only = 1;
+    }
+
+    switch (r->headers_out.status) {
+
+    case NGX_HTTP_OK:
+        break;
+
+    case NGX_HTTP_NO_CONTENT:
+        r->header_only = 1;
+
+        ngx_str_null(&r->headers_out.content_type);
+
+        r->headers_out.content_length = NULL;
+        r->headers_out.content_length_n = -1;
+
+        r->headers_out.last_modified_time = -1;
+        r->headers_out.last_modified = NULL;
+        break;
+
+    case NGX_HTTP_PARTIAL_CONTENT:
+        break;
+
+    case NGX_HTTP_NOT_MODIFIED:
+        r->header_only = 1;
+        break;
+
+    default:
+        r->headers_out.last_modified_time = -1;
+        r->headers_out.last_modified = NULL;
+    }
+
     headers = ngx_array_create(r->pool, 1, sizeof(quiche_h3_header));
     if (headers == NULL) {
         return NGX_ERROR;
