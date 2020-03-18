@@ -460,6 +460,9 @@ ngx_http_v3_handler(ngx_connection_t *c)
 
             case QUICHE_H3_EVENT_DATAGRAM:
                 break;
+
+            case QUICHE_H3_EVENT_GOAWAY:
+                break;
         }
 
         quiche_h3_event_free(ev);
