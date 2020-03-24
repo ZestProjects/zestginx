@@ -1899,6 +1899,11 @@ ngx_http_v3_send_response(ngx_http_request_t *r)
 
     r->qstream->headers_sent = 1;
 
+    if (r->done) {
+        fc->write->handler = ngx_http_v3_close_stream_handler;
+        fc->read->handler = ngx_http_empty_handler;
+    }
+
     ngx_post_event(c->write, &ngx_posted_events);
 
     return NGX_OK;
@@ -2043,6 +2048,12 @@ ngx_http_v3_close_stream(ngx_http_v3_stream_t *stream, ngx_int_t rc)
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, h3c->connection->log, 0,
                    "http3 close stream %ui", stream->id);
 
+    if (stream->blocked) {
+        fc->write->handler = ngx_http_v3_close_stream_handler;
+        fc->read->handler = ngx_http_empty_handler;
+        return;
+    }
+
     quiche_conn_stream_shutdown(h3c->connection->quic->conn, stream->id,
                                 QUICHE_SHUTDOWN_READ, 0);
 
@@ -2116,6 +2127,8 @@ ngx_http_v3_finalize_connection(ngx_http_v3_connection_t *h3c,
 
     c = h3c->connection;
 
+    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, c->log, 0, "http3 finalize connection");
+
     quiche_conn_close(c->quic->conn, true, status, NULL, 0);
 
     c->error = 1;
@@ -2147,7 +2160,16 @@ ngx_http_v3_finalize_connection(ngx_http_v3_connection_t *h3c,
 
         fc->error = 1;
 
-        ev = fc->read;
+        if (stream->blocked) {
+            stream->blocked = 0;
+
+            ev = fc->write;
+            ev->active = 0;
+            ev->ready = 1;
+
+        } else {
+            ev = fc->read;
+        }
 
         ev->eof = 1;
         ev->handler(ev);
