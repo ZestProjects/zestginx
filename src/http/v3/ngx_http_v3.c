@@ -1893,6 +1893,10 @@ ngx_http_v3_send_response(ngx_http_request_t *r)
         return NGX_ERROR;
     }
 
+    if (fin) {
+        r->qstream->out_closed = 1;
+    }
+
     r->qstream->headers_sent = 1;
 
     ngx_post_event(c->write, &ngx_posted_events);
@@ -1961,6 +1965,20 @@ ngx_http_v3_send_chain(ngx_connection_t *fc, ngx_chain_t *in, off_t limit)
     send = 0;
 
     blocked = 0;
+
+    while (in) {
+        off_t size = ngx_buf_size(in->buf);
+
+        if (size || in->buf->last_buf) {
+            break;
+        }
+
+        in = in->next;
+    }
+
+    if (in == NULL || stream->out_closed) {
+        return NULL;
+    }
 
     while (in) {
         prev_send = send;
