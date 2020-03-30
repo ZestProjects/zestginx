@@ -500,6 +500,10 @@ ngx_quic_finalize_connection(ngx_connection_t *c, ngx_uint_t status)
 
     c->error = 1;
 
+    if (quiche_conn_is_closed(c->quic->conn)) {
+        c->close = 1;
+    }
+
     quiche_conn_close(c->quic->conn, false, status, NULL, 0);
 
     /* Notify the application layer that the connection is in an error

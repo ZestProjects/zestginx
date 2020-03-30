@@ -1535,6 +1535,10 @@ ngx_http_v3_send_response(ngx_http_request_t *r)
 
     fc = r->connection;
 
+    if (fc->error) {
+        return NGX_ERROR;
+    }
+
     h3c = r->qstream->connection;
     c = h3c->connection;
 
@@ -2159,6 +2163,10 @@ ngx_http_v3_finalize_connection(ngx_http_v3_connection_t *h3c,
         fc = r->connection;
 
         fc->error = 1;
+
+        if (c->close) {
+            fc->close = 1;
+        }
 
         if (stream->blocked) {
             stream->blocked = 0;
