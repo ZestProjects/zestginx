@@ -1882,7 +1882,7 @@ ngx_ssl_stapling(ngx_conf_t *cf, ngx_ssl_t *ssl, ngx_str_t *file,
 
     BIO            *bio;
     int             len;
-    u_char          buf[1024];
+    u_char          buf[2048];
 
     if (ngx_conf_full_name(cf->cycle, file, 1) != NGX_OK) {
         return NGX_ERROR;
@@ -1905,7 +1905,7 @@ ngx_ssl_stapling(ngx_conf_t *cf, ngx_ssl_t *ssl, ngx_str_t *file,
         return NGX_ERROR;
     }
 
-    if (len >= 1000) {
+    if (len >= 2000) {
         ngx_ssl_error(NGX_LOG_EMERG, ssl->log, 0,
                       "Unexpected OCSP response file length: %d", len);
         return NGX_ERROR;
