@@ -2049,6 +2049,8 @@ ngx_http_v3_close_stream(ngx_http_v3_stream_t *stream, ngx_int_t rc)
 
     h3c = stream->connection;
 
+    fc = stream->request->connection;
+
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, h3c->connection->log, 0,
                    "http3 close stream %ui", stream->id);
 
