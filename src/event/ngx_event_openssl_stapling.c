@@ -1917,7 +1917,7 @@ ngx_ssl_stapling(ngx_conf_t *cf, ngx_ssl_t *ssl, ngx_str_t *file,
         return NGX_ERROR;
     }
 #else
-    ngx_log_error(NGX_LOG_WARN, ssl->log, 0,
+    ngx_log_error(NGX_LOG_NOTICE, ssl->log, 0,
                   "\"ssl_stapling\" ignored, not supported");
 #endif
 
