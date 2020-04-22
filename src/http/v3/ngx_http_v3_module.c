@@ -159,7 +159,7 @@ quiche_log(const char *line, void *argp)
 {
     ngx_log_t *log = ngx_cycle->log;
 
-    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, log, 0, line);
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0, "%s", line);
 }
 #endif
 
