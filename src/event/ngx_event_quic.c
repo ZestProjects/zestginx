@@ -166,7 +166,7 @@ ngx_quic_create_connection(ngx_quic_t *quic, ngx_connection_t *c)
     ngx_log_debug4(NGX_LOG_DEBUG_EVENT, c->log, 0,
         "new quic connection dcid:%*.s new_scid:%*.s",
         ngx_hex_dump(dcid_hex, dcid, dcid_len) - dcid_hex, dcid_hex,
-        ngx_hex_dump(scid_hex, scid, scid_len) - scid_hex, scid_hex);
+        ngx_hex_dump(scid_hex, scid, sizeof(scid)) - scid_hex, scid_hex);
     }
 #endif
 
