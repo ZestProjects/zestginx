@@ -2008,13 +2008,15 @@ ngx_http_v3_send_chain(ngx_connection_t *fc, ngx_chain_t *in, off_t limit)
 
         in->buf->pos += sent;
 
-        if (in->buf->pos == in->buf->last) {
-            in = in->next;
-        }
-
-        if (send - prev_send != sent) {
+        /* Partial (or no) write, end now. */
+        if ((n == NGX_AGAIN) || (send - prev_send != sent)) {
             blocked = 1;
             break;
+        }
+
+        /* Buffer is fully written, switch to the next. */
+        if (in->buf->pos == in->buf->last) {
+            in = in->next;
         }
 
         if (fin) {
