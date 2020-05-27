@@ -17,6 +17,6 @@ cat << END                                                    >> $NGX_MAKEFILE
 $QUICHE/target/$QUICHE_BUILD_TARGET/libquiche.a: \\
 		$OPENSSL/.openssl/include/openssl/ssl.h \\
 		$NGX_MAKEFILE
-	cd $QUICHE && cargo build $QUICHE_BUILD_FLAGS
+	cd $QUICHE && cargo build $QUICHE_BUILD_FLAGS $QUICHE_OPT
 
 END
