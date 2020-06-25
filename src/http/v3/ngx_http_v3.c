@@ -878,7 +878,10 @@ ngx_http_v3_parse_method(ngx_http_request_t *r, ngx_str_t *value)
 static ngx_int_t
 ngx_http_v3_parse_scheme(ngx_http_request_t *r, ngx_str_t *value)
 {
-    if (r->schema_start) {
+    u_char      c, ch;
+    ngx_uint_t  i;
+
+    if (r->schema.len) {
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                       "client sent duplicate :scheme header");
 
@@ -892,8 +895,27 @@ ngx_http_v3_parse_scheme(ngx_http_request_t *r, ngx_str_t *value)
         return NGX_DECLINED;
     }
 
-    r->schema_start = value->data;
-    r->schema_end = value->data + value->len;
+    for (i = 0; i < value->len; i++) {
+        ch = value->data[i];
+
+        c = (u_char) (ch | 0x20);
+        if (c >= 'a' && c <= 'z') {
+            continue;
+        }
+
+        if (((ch >= '0' && ch <= '9') || ch == '+' || ch == '-' || ch == '.')
+            && i > 0)
+        {
+            continue;
+        }
+
+        ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                      "client sent invalid :scheme header: \"%V\"", value);
+
+        return NGX_DECLINED;
+    }
+
+    r->schema = *value;
 
     return NGX_OK;
 }
@@ -956,14 +978,14 @@ ngx_http_v3_construct_request_line(ngx_http_request_t *r)
     static const u_char ending[] = " HTTP/3";
 
     if (r->method_name.len == 0
-        || r->schema_start == NULL
+        || r->schema.len == 0
         || r->unparsed_uri.len == 0)
     {
         if (r->method_name.len == 0) {
             ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                           "client sent no :method header");
 
-        } else if (r->schema_start == NULL) {
+        } else if (r->schema.len == 0) {
             ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                           "client sent no :scheme header");
 
