@@ -9,6 +9,10 @@
 #include <ngx_core.h>
 #include <ngx_event.h>
 
+#if (NGX_HAVE_FILE_AIO)
+#include <liburing.h>
+#endif
+
 
 #if (NGX_TEST_BUILD_EPOLL)
 
@@ -125,6 +129,7 @@ static ngx_connection_t     notify_conn;
 
 #if (NGX_HAVE_FILE_AIO)
 struct io_uring             ngx_ring;
+struct io_uring_params      ngx_ring_params;
 
 static ngx_event_t          ngx_ring_event;
 static ngx_connection_t     ngx_ring_conn;
@@ -202,9 +207,9 @@ ngx_epoll_aio_init(ngx_cycle_t *cycle, ngx_epoll_conf_t *epcf)
 {
     struct epoll_event  ee;
 
-    if (io_uring_queue_init(64, &ngx_ring, 0) < 0) {
+    if (io_uring_queue_init_params(64, &ngx_ring, &ngx_ring_params) < 0) {
         ngx_log_error(NGX_LOG_EMERG, cycle->log, ngx_errno,
-                      "io_uring_queue_init() failed");
+                      "io_uring_queue_init_params() failed");
         goto failed;
     }
 
@@ -849,12 +854,14 @@ ngx_epoll_io_uring_handler(ngx_event_t *ev)
 {
     ngx_event_t      *e;
     struct io_uring_cqe  *cqe;
+    unsigned head;
+    unsigned cqe_count = 0;
     ngx_event_aio_t  *aio;
 
     ngx_log_debug(NGX_LOG_DEBUG_EVENT, ev->log, 0,
                    "io_uring_peek_cqe: START");
 
-    while (io_uring_peek_cqe(&ngx_ring, &cqe) >= 0 && cqe) {
+    io_uring_for_each_cqe(&ngx_ring, head, cqe) {
         ngx_log_debug3(NGX_LOG_DEBUG_EVENT, ev->log, 0,
                        "io_event: %p %d %d",
                        cqe->user_data, cqe->res, cqe->flags);
@@ -867,10 +874,12 @@ ngx_epoll_io_uring_handler(ngx_event_t *ev)
         aio = e->data;
         aio->res = cqe->res;
 
-        io_uring_cqe_seen(&ngx_ring, cqe);
+        ++cqe_count;
 
         ngx_post_event(e, &ngx_posted_events);
     }
+
+    io_uring_cq_advance(&ngx_ring, cqe_count);
 }
 
 #endif
