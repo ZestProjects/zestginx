@@ -212,10 +212,6 @@ ngx_quic_handshake(ngx_connection_t *c)
         return NGX_ERROR;
     }
 
-    if (ngx_handle_read_event(c->read, 0) != NGX_OK) {
-        return NGX_ERROR;
-    }
-
     c->read->handler = ngx_quic_read_handler;
     c->write->handler = ngx_quic_write_handler;
 
@@ -288,11 +284,6 @@ ngx_quic_read_handler(ngx_event_t *rev)
 
     ngx_log_debug0(NGX_LOG_DEBUG_EVENT, c->log, 0, "quic done reading");
 
-    if (ngx_handle_read_event(c->read, 0) != NGX_OK) {
-        ngx_quic_finalize_connection(c, NGX_QUIC_INTERNAL_ERROR);
-        return;
-    }
-
     ngx_post_event(c->write, &ngx_posted_events);
 }
 
@@ -347,11 +338,6 @@ ngx_quic_write_handler(ngx_event_t *wev)
             ngx_quic_finalize_connection(c, NGX_QUIC_INTERNAL_ERROR);
             return;
         }
-    }
-
-    if (ngx_handle_write_event(c->write, 0) != NGX_OK) {
-        ngx_quic_finalize_connection(c, NGX_QUIC_INTERNAL_ERROR);
-        return;
     }
 
     expiry = quiche_conn_timeout_as_millis(c->quic->conn);
