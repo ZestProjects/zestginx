@@ -457,6 +457,9 @@ ngx_http_v3_handler(ngx_connection_t *c)
 
                 break;
             }
+
+            case QUICHE_H3_EVENT_DATAGRAM:
+                break;
         }
 
         quiche_h3_event_free(ev);
