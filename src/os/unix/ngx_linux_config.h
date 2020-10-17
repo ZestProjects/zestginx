@@ -93,6 +93,9 @@ extern ssize_t sendfile(int s, int fd, int32_t *offset, size_t size);
 #include <sys/eventfd.h>
 #endif
 #include <sys/syscall.h>
+#if (NGX_HAVE_FILE_AIO)
+#include <liburing.h>
+#endif
 
 
 #if (NGX_HAVE_CAPABILITIES)

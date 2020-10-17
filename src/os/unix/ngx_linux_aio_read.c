@@ -9,11 +9,8 @@
 #include <ngx_core.h>
 #include <ngx_event.h>
 
-#include <liburing.h>
 
-
-extern struct io_uring          ngx_ring;
-extern struct io_uring_params   ngx_ring_params;
+extern struct io_uring  ngx_ring;
 
 
 static void ngx_file_aio_event_handler(ngx_event_t *ev);
@@ -98,26 +95,11 @@ ngx_file_aio_read(ngx_file_t *file, u_char *buf, size_t size, off_t offset,
         return ngx_read_file(file, buf, size, offset);
     }
 
-    if (__builtin_expect(!!(ngx_ring_params.features & IORING_FEAT_CUR_PERSONALITY), 1)) {
-        /*
-         * `io_uring_prep_read` is faster than `io_uring_prep_readv`, because the kernel
-         * doesn't need to import iovecs in advance.
-         *
-         * If the kernel supports `IORING_FEAT_CUR_PERSONALITY`, it should support
-         * non-vectored read/write commands too.
-         *
-         * It's not perfect, but avoids an extra feature-test syscall.
-         */
-        io_uring_prep_read(sqe, file->fd, buf, size, offset);
-    } else {
-        /*
-         * We must store iov into heap to prevent kernel from returning -EFAULT
-         * in case `IORING_FEAT_SUBMIT_STABLE` is not supported
-         */
-        aio->iov.iov_base = buf;
-        aio->iov.iov_len = size;
-        io_uring_prep_readv(sqe, file->fd, &aio->iov, 1, offset);
-    }
+    /* We must store iov into heap to prevent kernel from returning -EFAULT */
+    aio->iov.iov_base = buf;
+    aio->iov.iov_len = size;
+    io_uring_prep_readv(sqe, file->fd, &aio->iov, 1, offset);
+    io_uring_sqe_set_data(sqe, ev);
 
 
     ev->handler = ngx_file_aio_event_handler;
