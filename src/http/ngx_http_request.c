@@ -894,12 +894,14 @@ ngx_http_ssl_servername(ngx_ssl_conn_t *ssl_conn, int *ad, void *arg)
     ngx_str_t                  host;
     const char                *servername;
     ngx_connection_t          *c;
+    ngx_http_request_t        *r;
     ngx_http_connection_t     *hc;
     ngx_http_ssl_srv_conf_t   *sscf;
     ngx_http_core_loc_conf_t  *clcf;
     ngx_http_core_srv_conf_t  *cscf;
 
     c = ngx_ssl_get_connection(ssl_conn);
+    r = c->data;
 
     if (c->ssl->handshaked) {
         *ad = SSL_AD_NO_RENEGOTIATION;
@@ -1000,6 +1002,11 @@ done:
     if (sscf->reject_handshake) {
         c->ssl->handshake_rejected = 1;
         *ad = SSL_AD_UNRECOGNIZED_NAME;
+
+        if (sscf->reject_handshake_quietly) {
+            ngx_http_terminate_request(r, 0);
+        }
+
         return SSL_TLSEXT_ERR_ALERT_FATAL;
     }
 
