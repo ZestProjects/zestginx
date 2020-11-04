@@ -2973,9 +2973,6 @@ ngx_ssl_connection_error(ngx_connection_t *c, int sslerr, ngx_err_t err,
     char *text)
 {
     int         n;
-#if (defined SSL_R_CALLBACK_FAILED && defined SSL_F_FINAL_SERVER_NAME)
-    int         f;
-#endif
     ngx_uint_t  level;
 
     level = NGX_LOG_CRIT;
@@ -3014,24 +3011,6 @@ ngx_ssl_connection_error(ngx_connection_t *c, int sslerr, ngx_err_t err,
     } else if (sslerr == SSL_ERROR_SSL) {
 
         n = ERR_GET_REASON(ERR_peek_error());
-
-        /* Strict SNI Error Patch
-         * https://github.com/hakasenyang/openssl-patch/issues/1#issuecomment-427040319
-         * https://github.com/hakasenyang/openssl-patch/issues/7#issuecomment-427872934
-         */
-#if (defined SSL_R_CALLBACK_FAILED && defined SSL_F_FINAL_SERVER_NAME)
-        if (n == SSL_R_CALLBACK_FAILED) {
-            f = ERR_GET_FUNC(ERR_peek_error());
-            if (f == SSL_F_FINAL_SERVER_NAME) {
-                while (ERR_peek_error()) {
-                    ngx_ssl_error(NGX_LOG_DEBUG, c->log, 0,
-                                  "ignoring ssl error at STRICT SNI block");
-                }
-                ERR_clear_error();
-                return;
-            }
-        }
-#endif
 
             /* handshake failures */
         if (n == SSL_R_BAD_CHANGE_CIPHER_SPEC                        /*  103 */
