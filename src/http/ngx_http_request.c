@@ -3874,10 +3874,6 @@ ngx_http_close_connection(ngx_connection_t *c)
             c->quic->handler = ngx_http_close_connection;
             return;
         }
-
-        if (c->destroyed) {
-            return;
-        }
     }
 
 #endif

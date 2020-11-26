@@ -19,11 +19,16 @@ typedef struct {
 
 
 /* errors */
-#define NGX_HTTP_V3_NO_ERROR                     0x0
-#define NGX_HTTP_V3_INTERNAL_ERROR               0x3
+#define NGX_HTTP_V3_NO_ERROR                     0x0100
+#define NGX_HTTP_V3_PROTOCOL_ERROR               0x0101
+#define NGX_HTTP_V3_INTERNAL_ERROR               0x0102
 
 
 static void ngx_http_v3_handler(ngx_connection_t *c);
+
+static void ngx_http_v3_idle_handler(ngx_connection_t *c);
+
+static void ngx_http_v3_handle_connection(ngx_http_v3_connection_t *h3c);
 
 static ngx_http_v3_stream_t *ngx_http_v3_stream_lookup(
     ngx_http_v3_connection_t *h3c, ngx_uint_t stream_id);
@@ -404,8 +409,13 @@ ngx_http_v3_handler(ngx_connection_t *c)
 
     h3c = c->data;
 
+    if (c->read->timedout) {
+        ngx_http_v3_finalize_connection(h3c, NGX_HTTP_V3_PROTOCOL_ERROR);
+        return;
+    }
+
     if (c->error) {
-        ngx_http_v3_finalize_connection(h3c, 0);
+        ngx_http_v3_finalize_connection(h3c, NGX_HTTP_V3_INTERNAL_ERROR);
         return;
     }
 
@@ -432,6 +442,8 @@ ngx_http_v3_handler(ngx_connection_t *c)
             case QUICHE_H3_EVENT_DATA: {
                 if (ngx_http_v3_process_data(c, stream_id) == NGX_AGAIN) {
                     quiche_h3_event_free(ev);
+
+                    ngx_http_v3_handle_connection(h3c);
                     return;
                 }
 
@@ -467,6 +479,68 @@ ngx_http_v3_handler(ngx_connection_t *c)
 
         quiche_h3_event_free(ev);
     }
+
+    ngx_http_v3_handle_connection(h3c);
+}
+
+
+static void
+ngx_http_v3_idle_handler(ngx_connection_t *c)
+{
+    ngx_http_v3_connection_t  *h3c;
+
+    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, c->log, 0, "http3 idle handler");
+
+    h3c = c->data;
+
+    if (c->read->timedout) {
+        ngx_http_v3_finalize_connection(h3c, NGX_HTTP_V3_NO_ERROR);
+        return;
+    }
+
+    if (c->error) {
+        ngx_http_v3_finalize_connection(h3c, NGX_HTTP_V3_INTERNAL_ERROR);
+        return;
+    }
+
+    if (!quiche_conn_is_readable(c->quic->conn)) {
+        return;
+    }
+
+    if (c->read->timer_set) {
+        ngx_del_timer(c->read);
+    }
+
+    c->quic->handler = ngx_http_v3_handler;
+
+    ngx_http_v3_handler(c);
+}
+
+
+static void
+ngx_http_v3_handle_connection(ngx_http_v3_connection_t *h3c)
+{
+    ngx_connection_t        *c;
+    ngx_http_v3_srv_conf_t  *h3scf;
+
+    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, h3c->connection->log, 0,
+                   "http3 handle connection");
+
+    c = h3c->connection;
+
+    if (h3c->processing || c->error) {
+        return;
+    }
+
+    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, h3c->connection->log, 0,
+                   "http3 connection is idle");
+
+    h3scf = ngx_http_get_module_srv_conf(h3c->http_connection->conf_ctx,
+                                         ngx_http_v3_module);
+
+    c->quic->handler = ngx_http_v3_idle_handler;
+
+    ngx_add_timer(c->read, h3scf->idle_timeout);
 }
 
 
@@ -2123,6 +2197,8 @@ ngx_http_v3_close_stream(ngx_http_v3_stream_t *stream, ngx_int_t rc)
     h3c->free_fake_connections = fc;
 
     h3c->processing--;
+
+    ngx_http_v3_handle_connection(h3c);
 }
 
 

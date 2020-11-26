@@ -19,6 +19,8 @@
 static void ngx_quic_read_handler(ngx_event_t *ev);
 static void ngx_quic_write_handler(ngx_event_t *ev);
 
+static void ngx_quic_set_timer(ngx_connection_t *c);
+
 static void ngx_quic_handshake_completed(ngx_connection_t *c);
 
 static void ngx_quic_shutdown_handler(ngx_event_t *ev);
@@ -179,6 +181,7 @@ ngx_quic_create_connection(ngx_quic_t *quic, ngx_connection_t *c)
 
     qc = ngx_pcalloc(c->pool, sizeof(ngx_quic_connection_t));
     if (qc == NULL) {
+        quiche_conn_free(conn);
         return NGX_ERROR;
     }
 
@@ -238,7 +241,9 @@ ngx_quic_read_handler(ngx_event_t *rev)
         ngx_log_debug0(NGX_LOG_DEBUG_EVENT, c->log, 0,
                        "quic connection timed out");
 
-        ngx_quic_finalize_connection(c, NGX_QUIC_INTERNAL_ERROR);
+        if (c->quic->handler != NULL) {
+            c->quic->handler(c);
+        }
         return;
     }
 
@@ -292,7 +297,6 @@ static void
 ngx_quic_write_handler(ngx_event_t *wev)
 {
     ngx_connection_t   *c;
-    uint64_t            expiry;
     static uint8_t      out[MAX_DATAGRAM_SIZE];
 
     c = wev->data;
@@ -339,6 +343,18 @@ ngx_quic_write_handler(ngx_event_t *wev)
             return;
         }
     }
+
+    ngx_quic_set_timer(c);
+}
+
+
+static void
+ngx_quic_set_timer(ngx_connection_t *c)
+{
+    uint64_t      expiry;
+    ngx_event_t  *wev;
+
+    wev = c->write;
 
     expiry = quiche_conn_timeout_as_millis(c->quic->conn);
     expiry = ngx_max(expiry, 1);
@@ -418,36 +434,41 @@ ngx_quic_handshake_completed(ngx_connection_t *c)
 ngx_int_t
 ngx_quic_shutdown(ngx_connection_t *c)
 {
-    if (!quiche_conn_is_closed(c->quic->conn)) {
-        /* We shouldn't free the connection state yet, as we need to wait for
-         * the draining timeout to expire. Setup event handlers such that we
-         * will try again when that happens (or when another event is
-         * triggered). */
-        c->read->handler = ngx_quic_shutdown_handler;
-        c->write->handler = ngx_quic_shutdown_handler;
+    ssize_t         written;
+    static uint8_t  out[MAX_DATAGRAM_SIZE];
 
-        /* We need to flush any remaining frames to the client (including
-         * CONNECTION_CLOSE), so invoke the write handler. This also takes
-         * care of setting up the draining timer. */
-        ngx_quic_write_handler(c->write);
+    /* Connection is closed, free memory. */
+    if (quiche_conn_is_closed(c->quic->conn)) {
+        ngx_log_debug0(NGX_LOG_DEBUG_EVENT, c->log, 0, "free quic connection");
 
-        /* The QUIC connection might have already been freed inside the write
-         * handler, in which case we are done. */
-        if (c->destroyed) {
-            return NGX_OK;
-        }
+        quiche_conn_free(c->quic->conn);
 
-        return NGX_AGAIN;
+        c->quic = NULL;
+        c->ssl = NULL;
+
+        return NGX_OK;
     }
 
-    ngx_log_debug0(NGX_LOG_DEBUG_EVENT, c->log, 0, "free quic connection");
+    /* We can't free the connection state yet, as we need to wait for the
+     * draining timeout to expire.
+     *
+     * Setup event handlers such that we will try again when that happens (or
+     * when another event is triggered). */
+    c->read->handler = ngx_quic_shutdown_handler;
+    c->write->handler = ngx_quic_shutdown_handler;
 
-    quiche_conn_free(c->quic->conn);
+    /* Try sending a packet in order to flush pending frames (CONNECTION_CLOSE
+     * for example), but ignore errors as we are already closing the connection
+     * anyway. */
+    written = quiche_conn_send(c->quic->conn, out, sizeof(out));
 
-    c->quic = NULL;
-    c->ssl = NULL;
+    if (written > 0) {
+        ngx_quic_send_udp_packet(c, out, written);
+    }
 
-    return NGX_OK;
+    ngx_quic_set_timer(c);
+
+    return NGX_AGAIN;
 }
 
 
@@ -457,6 +478,8 @@ ngx_quic_shutdown_handler(ngx_event_t *ev)
     ngx_connection_t           *c;
     ngx_connection_handler_pt   handler;
 
+    ngx_log_debug0(NGX_LOG_DEBUG_EVENT, ev->log, 0, "quic shutdown handler");
+
     c = ev->data;
     handler = c->quic->handler;
 
@@ -464,11 +487,7 @@ ngx_quic_shutdown_handler(ngx_event_t *ev)
         ngx_log_debug0(NGX_LOG_DEBUG_EVENT, c->log, 0, "quic alarm fired");
 
         quiche_conn_on_timeout(c->quic->conn);
-
-        ev->timedout = 0;
     }
-
-    ngx_log_debug0(NGX_LOG_DEBUG_EVENT, ev->log, 0, "quic shutdown handler");
 
     if (ngx_quic_shutdown(c) == NGX_AGAIN) {
         return;
@@ -514,10 +533,6 @@ ngx_quic_close_connection(ngx_connection_t *c)
     if (c->quic) {
         if (ngx_quic_shutdown(c) == NGX_AGAIN) {
             c->quic->handler = ngx_quic_close_connection;
-            return;
-        }
-
-        if (c->destroyed) {
             return;
         }
     }
