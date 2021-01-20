@@ -46,6 +46,7 @@ struct ngx_http_v3_stream_s {
 
     ngx_http_v3_connection_t  *connection;
 
+    ngx_array_t               *headers;
     ngx_array_t               *cookies;
 
     ngx_http_v3_stream_t      *next;
