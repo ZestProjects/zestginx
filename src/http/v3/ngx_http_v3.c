@@ -1627,11 +1627,81 @@ ngx_http_v3_read_unbuffered_request_body(ngx_http_request_t *r)
 /* End of functions copied from HTTP/2 module. */
 
 
+size_t
+ngx_http_v3_get_headers_out_count(ngx_http_request_t *r)
+{
+    size_t                     headers_count;
+    ngx_uint_t                 i;
+    ngx_list_part_t           *part;
+    ngx_table_elt_t           *header;
+
+    headers_count = 1; /* :status */
+
+    if (r->headers_out.server == NULL) {
+        headers_count += 1;
+    }
+
+    if (r->headers_out.date == NULL) {
+        headers_count += 1;
+    }
+
+    if (r->headers_out.content_type.len) {
+        headers_count += 1;
+    }
+
+    if (r->headers_out.content_length == NULL
+        && r->headers_out.content_length_n >= 0)
+    {
+        headers_count += 1;
+    }
+
+    if (r->headers_out.last_modified == NULL
+        && r->headers_out.last_modified_time != -1)
+    {
+        headers_count += 1;
+    }
+
+    if (r->headers_out.location && r->headers_out.location->value.len) {
+        headers_count += 1;
+    }
+
+#if (NGX_HTTP_GZIP)
+    if (r->gzip_vary) {
+        headers_count += 1;
+    }
+#endif
+
+    part = &r->headers_out.headers.part;
+    header = part->elts;
+
+    for (i = 0; /* void */; i++) {
+
+        if (i >= part->nelts) {
+            if (part->next == NULL) {
+                break;
+            }
+
+            part = part->next;
+            header = part->elts;
+            i = 0;
+        }
+
+        if (header[i].hash == 0) {
+            continue;
+        }
+
+        headers_count += 1;
+    }
+
+    return headers_count;
+}
+
+
 ngx_int_t
-ngx_http_v3_push_response_headers(ngx_http_request_t *r, ngx_array_t *out)
+ngx_http_v3_push_response_headers(ngx_http_request_t *r)
 {
     u_char                    *tmp;
-    size_t                     len;
+    size_t                     len, headers_count;
     ngx_str_t                  host, location;
     ngx_uint_t                 i, port;
     ngx_list_part_t           *part;
@@ -1641,6 +1711,12 @@ ngx_http_v3_push_response_headers(ngx_http_request_t *r, ngx_array_t *out)
     ngx_http_core_loc_conf_t  *clcf;
     ngx_http_core_srv_conf_t  *cscf;
     u_char                     addr[NGX_SOCKADDR_STRLEN];
+
+    /* The list of response headers was already generated, so there's nothing
+     * more to do here. */
+    if (r->qstream->headers != NULL) {
+        return NGX_OK;
+    }
 
     fc = r->connection;
 
@@ -1677,9 +1753,18 @@ ngx_http_v3_push_response_headers(ngx_http_request_t *r, ngx_array_t *out)
         r->headers_out.last_modified = NULL;
     }
 
+    headers_count = ngx_http_v3_get_headers_out_count(r);
+
+    r->qstream->headers =
+        ngx_array_create(r->pool, headers_count, sizeof(quiche_h3_header));
+
+    if (r->qstream->headers == NULL) {
+        return NGX_ERROR;
+    }
+
     /* Generate :status pseudo-header. */
     {
-        h = ngx_array_push(out);
+        h = ngx_array_push(r->qstream->headers);
         if (h == NULL) {
             return NGX_ERROR;
         }
@@ -1700,7 +1785,7 @@ ngx_http_v3_push_response_headers(ngx_http_request_t *r, ngx_array_t *out)
 
     /* Generate Server header.*/
     if (r->headers_out.server == NULL) {
-        h = ngx_array_push(out);
+        h = ngx_array_push(r->qstream->headers);
         if (h == NULL) {
             return NGX_ERROR;
         }
@@ -1728,7 +1813,7 @@ ngx_http_v3_push_response_headers(ngx_http_request_t *r, ngx_array_t *out)
                        "http3 output header: \"date: %V\"",
                        &ngx_cached_http_time);
 
-        h = ngx_array_push(out);
+        h = ngx_array_push(r->qstream->headers);
         if (h == NULL) {
             return NGX_ERROR;
         }
@@ -1742,7 +1827,7 @@ ngx_http_v3_push_response_headers(ngx_http_request_t *r, ngx_array_t *out)
 
     /* Generate Content-Type header. */
     if (r->headers_out.content_type.len) {
-        h = ngx_array_push(out);
+        h = ngx_array_push(r->qstream->headers);
         if (h == NULL) {
             return NGX_ERROR;
         }
@@ -1787,7 +1872,7 @@ ngx_http_v3_push_response_headers(ngx_http_request_t *r, ngx_array_t *out)
     if (r->headers_out.content_length == NULL
         && r->headers_out.content_length_n >= 0)
     {
-        h = ngx_array_push(out);
+        h = ngx_array_push(r->qstream->headers);
         if (h == NULL) {
             return NGX_ERROR;
         }
@@ -1809,7 +1894,7 @@ ngx_http_v3_push_response_headers(ngx_http_request_t *r, ngx_array_t *out)
     if (r->headers_out.last_modified == NULL
         && r->headers_out.last_modified_time != -1)
     {
-        h = ngx_array_push(out);
+        h = ngx_array_push(r->qstream->headers);
         if (h == NULL) {
             return NGX_ERROR;
         }
@@ -1911,7 +1996,7 @@ ngx_http_v3_push_response_headers(ngx_http_request_t *r, ngx_array_t *out)
                        "http3 output header: \"location: %V\"",
                        &r->headers_out.location->value);
 
-        h = ngx_array_push(out);
+        h = ngx_array_push(r->qstream->headers);
         if (h == NULL) {
             return NGX_ERROR;
         }
@@ -1926,7 +2011,7 @@ ngx_http_v3_push_response_headers(ngx_http_request_t *r, ngx_array_t *out)
 #if (NGX_HTTP_GZIP)
     /* Generate Vary header. */
     if (r->gzip_vary) {
-        h = ngx_array_push(out);
+        h = ngx_array_push(r->qstream->headers);
         if (h == NULL) {
             return NGX_ERROR;
         }
@@ -1962,7 +2047,7 @@ ngx_http_v3_push_response_headers(ngx_http_request_t *r, ngx_array_t *out)
             continue;
         }
 
-        h = ngx_array_push(out);
+        h = ngx_array_push(r->qstream->headers);
         if (h == NULL) {
             return NGX_ERROR;
         }
@@ -2006,18 +2091,8 @@ ngx_http_v3_send_response(ngx_http_request_t *r)
     h3c = r->qstream->connection;
     c = h3c->connection;
 
-    if (r->qstream->headers == NULL) {
-
-        r->qstream->headers =
-            ngx_array_create(r->pool, 1, sizeof(quiche_h3_header));
-
-        if (r->qstream->headers == NULL) {
-            return NGX_ERROR;
-        }
-
-        if (ngx_http_v3_push_response_headers(r, r->qstream->headers) != NGX_OK) {
-            return NGX_ERROR;
-        }
+    if (ngx_http_v3_push_response_headers(r) != NGX_OK) {
+        return NGX_ERROR;
     }
 
     fin = r->header_only
