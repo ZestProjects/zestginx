@@ -606,6 +606,10 @@ ngx_http_discard_request_body(ngx_http_request_t *r)
 #if (NGX_HTTP_V3)
     if (r->qstream) {
         r->qstream->skip_data = 1;
+
+        /* disable stream read to avoid pointless data events */
+        ngx_http_v3_stop_stream_read(r->qstream, 0);
+
         return NGX_OK;
     }
 #endif

@@ -1307,6 +1307,9 @@ ngx_http_v3_read_request_body(ngx_http_request_t *r)
 
     if (rb->buf == NULL) {
         stream->skip_data = 1;
+
+        /* disable stream read to avoid pointless data events */
+        ngx_http_v3_stop_stream_read(stream, 0);
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
@@ -1575,6 +1578,9 @@ ngx_http_v3_read_unbuffered_request_body(ngx_http_request_t *r)
         stream->skip_data = 1;
         fc->timedout = 1;
 
+        /* disable stream read to avoid pointless data events */
+        ngx_http_v3_stop_stream_read(stream, 0);
+
         return NGX_HTTP_REQUEST_TIME_OUT;
     }
 
@@ -1587,6 +1593,10 @@ ngx_http_v3_read_unbuffered_request_body(ngx_http_request_t *r)
 
     if (rc != NGX_OK) {
         stream->skip_data = 1;
+
+        /* disable stream read to avoid pointless data events */
+        ngx_http_v3_stop_stream_read(stream, 0);
+
         return rc;
     }
 
@@ -2224,6 +2234,25 @@ ngx_http_v3_close_stream_handler(ngx_event_t *ev)
     }
 
     ngx_http_v3_close_stream(r->qstream, 0);
+}
+
+void
+ngx_http_v3_stop_stream_read(ngx_http_v3_stream_t *stream, ngx_int_t rc)
+{
+    ngx_http_v3_connection_t  *h3c;
+
+    if (!stream) {
+        return;
+    }
+
+    h3c = stream->connection;
+
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, h3c->connection->log, 0,
+                   "http3 stream shutdown read %ui", stream->id);
+
+    quiche_conn_stream_shutdown(h3c->connection->quic->conn,
+                                stream->id,
+                                QUICHE_SHUTDOWN_READ, rc);
 }
 
 
