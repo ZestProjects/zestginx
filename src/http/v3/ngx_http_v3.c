@@ -425,8 +425,13 @@ ngx_http_v3_handler(ngx_connection_t *c)
         quiche_h3_event  *ev;
 
         int64_t stream_id = quiche_h3_conn_poll(h3c->h3, c->quic->conn, &ev);
-        if (stream_id < 0) {
+        if (stream_id == QUICHE_H3_ERR_DONE) {
             break;
+        }
+
+        if (stream_id < 0) {
+            ngx_http_v3_finalize_connection(h3c, NGX_HTTP_V3_PROTOCOL_ERROR);
+            return;
         }
 
         ngx_log_debug2(NGX_LOG_DEBUG_HTTP, h3c->connection->log, 0,
