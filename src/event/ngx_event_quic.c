@@ -335,7 +335,13 @@ ngx_quic_write_handler(ngx_event_t *wev)
             return;
         }
 
-        if (ngx_quic_send_udp_packet(c, out, written) == NGX_ERROR) {
+        int rc = ngx_quic_send_udp_packet(c, out, written);
+
+        if (rc == NGX_AGAIN) {
+            break;
+        }
+
+        if (rc == NGX_ERROR) {
             ngx_log_debug0(NGX_LOG_DEBUG_EVENT, c->log, 0,
                            "failed to send quic packet");
 
@@ -563,8 +569,9 @@ ngx_quic_cleanup_ctx(void *data)
 static ngx_int_t
 ngx_quic_send_udp_packet(ngx_connection_t *c, uint8_t *buf, size_t len)
 {
-    ngx_buf_t    out_buf = {0};
-    ngx_chain_t  out_chain = {0};
+    ngx_buf_t     out_buf = {0};
+    ngx_chain_t   out_chain = {0};
+    ngx_chain_t  *cl;
 
     /* The send_chain() API takes an ngx_chain_t parameter instead of a simple
      * buffer, so we need to initialize the chain such that it contains only a
@@ -582,7 +589,13 @@ ngx_quic_send_udp_packet(ngx_connection_t *c, uint8_t *buf, size_t len)
     out_chain.buf = &out_buf;
     out_chain.next = NULL;
 
-    if (c->send_chain(c, &out_chain, 0) == NGX_CHAIN_ERROR) {
+    cl = c->send_chain(c, &out_chain, 0);
+
+    if (cl != NULL) {
+        return NGX_AGAIN;
+    }
+
+    if (cl == NGX_CHAIN_ERROR) {
         return NGX_ERROR;
     }
 

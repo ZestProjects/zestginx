@@ -322,6 +322,7 @@ eintr:
 
         switch (err) {
         case NGX_EAGAIN:
+        case ENOBUFS:
             ngx_log_debug0(NGX_LOG_DEBUG_EVENT, c->log, err,
                            "sendmsg() not ready");
             return NGX_AGAIN;
