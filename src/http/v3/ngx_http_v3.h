@@ -67,13 +67,13 @@ typedef struct {
 
 void ngx_http_v3_init(ngx_event_t *rev);
 
-ngx_int_t ngx_http_v3_read_request_body(ngx_http_request_t *r);
-ngx_int_t ngx_http_v3_read_unbuffered_request_body(ngx_http_request_t *r);
-
 ngx_int_t ngx_http_v3_send_response(ngx_http_request_t *r);
 
 void ngx_http_v3_close_stream(ngx_http_v3_stream_t *stream, ngx_int_t rc);
 void ngx_http_v3_stop_stream_read(ngx_http_v3_stream_t *stream, ngx_int_t rc);
+
+ngx_int_t ngx_http_v3_request_body_filter(ngx_http_request_t *r,
+    ngx_chain_t *in);
 
 
 #endif /* _NGX_HTTP_V3_H_INCLUDED_ */

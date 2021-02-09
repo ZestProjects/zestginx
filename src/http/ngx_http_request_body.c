@@ -89,8 +89,7 @@ ngx_http_read_client_request_body(ngx_http_request_t *r,
 
 #if (NGX_HTTP_V3)
     if (r->qstream) {
-        rc = ngx_http_v3_read_request_body(r);
-        goto done;
+        return NGX_AGAIN;
     }
 #endif
 
@@ -238,13 +237,7 @@ ngx_http_read_unbuffered_request_body(ngx_http_request_t *r)
 
 #if (NGX_HTTP_V3)
     if (r->qstream) {
-        rc = ngx_http_v3_read_unbuffered_request_body(r);
-
-        if (rc == NGX_OK) {
-            r->reading_body = 0;
-        }
-
-        return rc;
+        return NGX_AGAIN;
     }
 #endif
 
@@ -952,6 +945,12 @@ ngx_http_test_expect(ngx_http_request_t *r)
 static ngx_int_t
 ngx_http_request_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
 {
+#if (NGX_HTTP_V3)
+    if (r->qstream) {
+        return ngx_http_v3_request_body_filter(r, in);
+    }
+#endif
+
     if (r->headers_in.chunked) {
         return ngx_http_request_body_chunked_filter(r, in);
 
