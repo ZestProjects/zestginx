@@ -88,7 +88,7 @@ mandir=${mandir-'${prefix}/share/man'}
 shared_ext='.so'
 shared=1
 gzfileops=1
-compat=0
+compat=1
 cover=0
 build32=0
 build64=0
@@ -147,7 +147,7 @@ case "$1" in
       echo '    [--includedir=INCLUDEDIR] [--archs="-arch i386 -arch x86_64"]' | tee -a configure.log
       echo '    [--warn]                    Enables extra compiler warnings' | tee -a configure.log
       echo '    [--debug]                   Enables extra debug prints during operation' | tee -a configure.log
-      echo '    [--zlib-compat]             Compiles for zlib-compatible API instead of zlib-ng API' | tee -a configure.log
+      echo '    [--nozlib-compat]           Compiles for zlib-ng API instead of zlib-compatible API' | tee -a configure.log
       echo '    [--without-gzfileops]       Compiles with the gzfile parts of the API enabled' | tee -a configure.log
       echo '    [--without-optimizations]   Compiles without support for optional instruction sets' | tee -a configure.log
       echo '    [--without-new-strategies]  Compiles without using new additional deflate strategies' | tee -a configure.log
@@ -172,7 +172,7 @@ case "$1" in
     -i* | --includedir) includedir="$2"; shift; shift ;;
     -s* | --shared | --enable-shared) shared=1; shift ;;
     -t | --static) shared=0; shift ;;
-    --zlib-compat) compat=1; shift ;;
+    --nozlib-compat) compat=0; shift ;;
     --without-gzfileops) gzfileops=0; shift ;;
     --cover) cover=1; shift ;;
     -3* | --32) build32=1; shift ;;
@@ -252,7 +252,7 @@ if test $build64 -eq 1; then
   LDFLAGS="${LDFLAGS} -m64"
 fi
 
-# Set library name depending on zlib-compat option
+# Set library name depending on nozlib-compat option
 if test $compat -eq 0; then
   LIBNAME=libz-ng
   LIBNAME2=zlib-ng
@@ -814,7 +814,7 @@ EOF
     fi
 fi
 
-# if --zlib-compat was requested
+# if --nozlib-compat was requested
 if test $compat -eq 1; then
   gzfileops=1
   CFLAGS="${CFLAGS} -DZLIB_COMPAT"
