@@ -361,7 +361,7 @@ ngx_http_init_connection(ngx_connection_t *c)
 
         /* We already have a UDP packet in the connection buffer, so we don't
          * need to wait for another read event to kick-off the handshake. */
-        ngx_add_timer(rev, c->listening->post_accept_timeout);
+        ngx_add_timer(rev, cscf->client_header_timeout);
         ngx_http_quic_handshake(rev);
         return;
     }
@@ -1109,6 +1109,7 @@ ngx_http_quic_handshake(ngx_event_t *rev)
     ngx_http_connection_t     *hc;
     ngx_http_v3_srv_conf_t    *qscf;
     ngx_http_ssl_srv_conf_t   *sscf;
+    ngx_http_core_srv_conf_t  *cscf;
 
     c = rev->data;
     hc = c->data;
@@ -1149,7 +1150,8 @@ ngx_http_quic_handshake(ngx_event_t *rev)
     if (rc == NGX_AGAIN) {
 
         if (!rev->timer_set) {
-            ngx_add_timer(rev, c->listening->post_accept_timeout);
+            cscf = ngx_http_get_module_srv_conf(hc->conf_ctx, ngx_http_core_module);
+            ngx_add_timer(rev, cscf->client_header_timeout);
         }
 
         c->ssl->handler = ngx_http_ssl_handshake_handler;
