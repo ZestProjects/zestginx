@@ -1,0 +1,8 @@
+[submodule "deps/brotli"]
+        path = modules/ngx_brotli/deps/brotli
+        url = https://github.com/google/brotli.git
+
+[submodule "boringssl"]
+        path = modules/quiche/deps/boringssl
+        url = https://github.com/google/boringssl.git
+        ignore = dirty
