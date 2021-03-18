@@ -177,6 +177,18 @@ if [ "$NGX_PLATFORM" != win32 ]; then
         MAIN_LINK="-Wl,-E"
     fi
 
+    case "$CFLAGS" in
+
+        *-fuse-ld=gold*)
+            MAIN_LINK="$MAIN_LINK -fuse-ld=gold"
+        ;;
+
+        *-fuse-ld=lld*)
+            MAIN_LINK="$MAIN_LINK -fuse-ld=lld"
+        ;;
+
+    esac
+
 
     if [ "$NGX_CC_NAME" = "sunc" ]; then
         echo "checking for gcc builtin atomic operations ... disabled"
