@@ -42,6 +42,12 @@ typedef struct {
     ngx_array_t                    *certificate_key_values;
 
     ngx_str_t                       dhparam;
+
+#ifndef BORINGSSL_MAKE_DELETER
+    ngx_str_t                       echkeydir;
+    ngx_int_t                       echkeydir_maxkeys;
+#endif
+
     ngx_str_t                       ecdh_curve;
     ngx_str_t                       client_certificate;
     ngx_str_t                       trusted_certificate;

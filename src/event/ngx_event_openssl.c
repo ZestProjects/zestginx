@@ -9,6 +9,13 @@
 #include <ngx_core.h>
 #include <ngx_event.h>
 
+#ifndef BORINGSSL_MAKE_DELETER
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <openssl/ech.h>
+#endif
+
 
 #define NGX_SSL_PASSWORD_BUFFER_SIZE  4096
 
@@ -880,6 +887,16 @@ ngx_ssl_client_certificate(ngx_conf_t *cf, ngx_ssl_t *ssl, ngx_str_t *cert,
         return NGX_ERROR;
     }
 
+#ifndef BORINGSSL_MAKE_DELETER
+    if (SSL_CTX_load_verify_file(ssl->ctx, (char *) cert->data)
+        == 0)
+    {
+        ngx_ssl_error(NGX_LOG_EMERG, ssl->log, 0,
+                      "SSL_CTX_load_verify_file(\"%s\") failed",
+                      cert->data);
+        return NGX_ERROR;
+    }
+#else
     if (SSL_CTX_load_verify_locations(ssl->ctx, (char *) cert->data, NULL)
         == 0)
     {
@@ -888,6 +905,7 @@ ngx_ssl_client_certificate(ngx_conf_t *cf, ngx_ssl_t *ssl, ngx_str_t *cert,
                       cert->data);
         return NGX_ERROR;
     }
+#endif
 
     /*
      * SSL_CTX_load_verify_locations() may leave errors in the error queue
@@ -927,6 +945,16 @@ ngx_ssl_trusted_certificate(ngx_conf_t *cf, ngx_ssl_t *ssl, ngx_str_t *cert,
         return NGX_ERROR;
     }
 
+#ifndef BORINGSSL_MAKE_DELETER
+    if (SSL_CTX_load_verify_file(ssl->ctx, (char *) cert->data)
+        == 0)
+    {
+        ngx_ssl_error(NGX_LOG_EMERG, ssl->log, 0,
+                      "SSL_CTX_load_verify_file(\"%s\") failed",
+                      cert->data);
+        return NGX_ERROR;
+    }
+#else
     if (SSL_CTX_load_verify_locations(ssl->ctx, (char *) cert->data, NULL)
         == 0)
     {
@@ -935,6 +963,7 @@ ngx_ssl_trusted_certificate(ngx_conf_t *cf, ngx_ssl_t *ssl, ngx_str_t *cert,
                       cert->data);
         return NGX_ERROR;
     }
+#endif
 
     /*
      * SSL_CTX_load_verify_locations() may leave errors in the error queue
@@ -1081,6 +1110,41 @@ ngx_ssl_info_callback(const ngx_ssl_conn_t *ssl_conn, int where, int ret)
         }
     }
 
+#endif
+
+#ifndef BORINGSSL_MAKE_DELETER
+    if ((where & SSL_CB_HANDSHAKE_DONE) == SSL_CB_HANDSHAKE_DONE) {
+        c = ngx_ssl_get_connection((ngx_ssl_conn_t *) ssl_conn);
+
+        char *inner_sni = NULL;
+        char *outer_sni = NULL;
+        int echrv = SSL_ech_get_status(c->ssl->connection, &inner_sni, &outer_sni);
+
+        switch (echrv) {
+
+        case SSL_ECH_STATUS_NOT_TRIED:
+            ngx_ssl_error(NGX_LOG_INFO, c->log, 0, "ECH not attempted");
+            break;
+
+        case SSL_ECH_STATUS_FAILED:
+            ngx_ssl_error(NGX_LOG_ERR, c->log, 0, "ECH tried but failed");
+            break;
+
+        case SSL_ECH_STATUS_BAD_NAME:
+            ngx_ssl_error(NGX_LOG_ERR, c->log, 0, "ECH worked but bad name");
+            break;
+
+        case SSL_ECH_STATUS_SUCCESS:
+            ngx_ssl_error(NGX_LOG_NOTICE, c->log, 0,
+                    "ECH success outer_sni: %s inner_sni: %s", (outer_sni ? outer_sni : "NONE"),
+                                                               (inner_sni ? inner_sni : "NONE"));
+            break;
+
+        default:
+            ngx_ssl_error(NGX_LOG_ERR, c->log, 0, "Error getting ECH status");
+            break;
+        }
+    }
 #endif
 
     if ((where & SSL_CB_ACCEPT_LOOP) == SSL_CB_ACCEPT_LOOP) {
@@ -1317,6 +1381,119 @@ ngx_ssl_passwords_cleanup(void *data)
         ngx_explicit_memzero(pwd[i].data, pwd[i].len);
     }
 }
+
+
+#ifndef BORINGSSL_MAKE_DELETER
+/*
+ * Load any key files called <name>.ech we find in the
+ * ssl_echkeydir directory.
+ */
+static int load_echkeys(ngx_ssl_t *ssl, ngx_str_t *dir, ngx_int_t *dir_maxfiles)
+{
+    ngx_dir_t thedir;
+    ngx_int_t nrv = ngx_open_dir(dir, &thedir);
+    char privname[PATH_MAX];
+    int somekeyworked = 0;
+    ngx_int_t maxkeyfiles = dir_maxfiles;
+    size_t elen = dir->len;
+
+    if (nrv != NGX_OK) {
+        ngx_ssl_error(NGX_LOG_EMERG, ssl->log, 0,
+            "load_echkeys, error opening %s at %d", dir->data,__LINE__);
+        return NGX_ERROR;
+    }
+
+    if (!dir_maxfiles) {
+        maxkeyfiles = 1024;
+    }
+
+    for (;;) {
+        nrv = ngx_read_dir(&thedir);
+        if (nrv != NGX_OK) {
+            break;
+        }
+        char *den = (char*)ngx_de_name(&thedir);
+        size_t nlen = strlen(den);
+        if (nlen > 4) {
+            char *last4 = (den + nlen - 4);
+            if (strncmp(last4, ".ech", 4)) {
+                continue;
+            }
+            if ((elen + 1 + nlen + 1) >= PATH_MAX) {
+                ngx_ssl_error(NGX_LOG_EMERG, ssl->log, 0,
+                    "load_echkeys, error, name too long: %s with %s", dirname->data,den);
+                continue;
+            }
+            snprintf(privname, PATH_MAX, "%s/%s", dirname->data, den);
+            if (!--maxkeyfiles) {
+                // Avoid infinitely looping.
+                ngx_ssl_error(NGX_LOG_ALERT, ssl->log, 0,
+                    "load_echkeys, too many private key files to check!");
+                ngx_ssl_error(NGX_LOG_ALERT, ssl->log, 0,
+                    "load_echkeys, maxkeyfiles is hardcoded to 1024, fix if you like!");
+                 return NGX_ERROR;
+            }
+            struct stat thestat;
+            if (stat(privname, &thestat) == 0) {
+                if (SSL_CTX_ech_server_enable(ssl->ctx, privname) != 1) {
+                    ngx_ssl_error(NGX_LOG_ALERT, ssl->log, 0,
+                        "load_echkeys, failed for: %s", privname);
+                } else {
+                    ngx_ssl_error(NGX_LOG_NOTICE, ssl->log, 0,
+                        "load_echkeys, worked for: %s", privname);
+                    somekeyworked = 1;
+                }
+            }
+        }
+    }
+    ngx_close_dir(&thedir);
+
+    if (somekeyworked == 0) {
+        ngx_ssl_error(NGX_LOG_EMERG, ssl->log, 0,
+            "load_echkeys failed for all keys but ECH configured");
+        return NGX_ERROR;
+    }
+
+    int numkeys = 0;
+    int rv = SSL_CTX_ech_server_key_status(ssl->ctx, &numkeys);
+    if (rv != 1) {
+        ngx_ssl_error(NGX_LOG_EMERG, ssl->log, 0,
+            "load_echkeys SSL_CTX_ech_server_key_status failed: %d", rv);
+        return NGX_ERROR;
+    }
+    ngx_ssl_error(NGX_LOG_NOTICE, ssl->log, 0,
+            "load_echkeys, total keys loaded: %d", numkeys);
+
+    return NGX_OK;
+}
+
+ngx_int_t
+ngx_ssl_echkeydir(ngx_conf_t *cf, ngx_ssl_t *ssl, ngx_str_t *dir, ngx_int_t *dir_maxfiles)
+{
+    if (!dir) {
+        return NGX_OK;
+    }
+
+    if (dir->len == 0) {
+        return NGX_OK;
+    }
+
+    if (ngx_conf_full_name(cf->cycle, dir, 1) != NGX_OK) {
+        ngx_ssl_error(NGX_LOG_EMERG, ssl->log, 0,
+                "Hey some bad ech stuff happened at %d", __LINE__);
+        return NGX_ERROR;
+    }
+
+    int rv = load_echkeys(ssl, dir, dir_maxfiles);
+    if (rv != NGX_OK) {
+        ngx_ssl_error(NGX_LOG_EMERG, ssl->log, 0,
+                "Hey some bad ech stuff happened at %d", __LINE__);
+        return rv;
+    }
+
+    return NGX_OK;
+}
+#endif
 
 
 ngx_int_t
@@ -4484,6 +4661,85 @@ ngx_ssl_get_cipher_name(ngx_connection_t *c, ngx_pool_t *pool, ngx_str_t *s)
     s->data = (u_char *) SSL_get_cipher_name(c->ssl->connection);
     return NGX_OK;
 }
+
+#ifndef BORINGSSL_MAKE_DELETER
+ngx_int_t
+ngx_ssl_get_ech_status(ngx_connection_t *c, ngx_pool_t *pool, ngx_str_t *s)
+{
+    char *inner_sni;
+    char *outer_sni;
+    char buf[PATH_MAX];
+    int echrv = SSL_ech_get_status(c->ssl->connection, &inner_sni, &outer_sni);
+
+    switch (echrv) {
+
+    case SSL_ECH_STATUS_NOT_TRIED:
+        snprintf(buf, PATH_MAX, "not attempted");
+        break;
+
+    case SSL_ECH_STATUS_FAILED:
+        snprintf(buf, PATH_MAX, "tried but failed");
+        break;
+
+    case SSL_ECH_STATUS_BAD_NAME:
+        snprintf(buf, PATH_MAX, "worked but bad name");
+        break;
+
+    case SSL_ECH_STATUS_SUCCESS:
+        snprintf(buf, PATH_MAX, "success");
+        break;
+
+    default:
+        snprintf(buf, PATH_MAX, "error getting ECH status");
+        break;
+    }
+
+    s->len = ngx_strlen(buf);
+    s->data = ngx_pnalloc(pool, s->len);
+    ngx_memcpy(s->data, buf, s->len);
+
+    return NGX_OK;
+}
+
+ngx_int_t
+ngx_ssl_get_ech_inner_sni(ngx_connection_t *c, ngx_pool_t *pool, ngx_str_t *s)
+{
+    char *inner_sni;
+    char *outer_sni;
+    int echrv = SSL_ech_get_status(c->ssl->connection, &inner_sni, &outer_sni);
+
+    if (echrv == SSL_ECH_STATUS_SUCCESS && inner_sni) {
+        s->len = strlen(inner_sni);
+        s->data = ngx_pnalloc(pool, s->len);
+        ngx_memcpy(s->data, inner_sni, s->len);
+    } else {
+        s->len = ngx_strlen("NONE");
+        s->data = ngx_pnalloc(pool, s->len);
+        ngx_memcpy(s->data, "NONE", s->len);
+    }
+
+    return NGX_OK;
+}
+
+ngx_int_t
+ngx_ssl_get_ech_outer_sni(ngx_connection_t *c, ngx_pool_t *pool, ngx_str_t *s)
+{
+    char *inner_sni;
+    char *outer_sni;
+    int echrv = SSL_ech_get_status(c->ssl->connection, &inner_sni, &outer_sni);
+    if (echrv == SSL_ECH_STATUS_SUCCESS && outer_sni) {
+        s->len = strlen(outer_sni);
+        s->data = ngx_pnalloc(pool, s->len);
+        ngx_memcpy(s->data, outer_sni, s->len);
+    } else {
+        s->len = ngx_strlen("NONE");
+        s->data = ngx_pnalloc(pool, s->len);
+        ngx_memcpy(s->data, "NONE", s->len);
+    }
+
+    return NGX_OK;
+}
+#endif
 
 
 ngx_int_t
