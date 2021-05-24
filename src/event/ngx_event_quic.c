@@ -172,7 +172,8 @@ ngx_quic_create_connection(ngx_quic_t *quic, ngx_connection_t *c)
     }
 #endif
 
-    conn = quiche_conn_new_with_tls(scid, sizeof(scid), NULL, 0, quic->config,
+    conn = quiche_conn_new_with_tls(scid, sizeof(scid), NULL, 0,
+                                    c->sockaddr, c->socklen, quic->config,
                                     c->ssl->connection, true);
     if (conn == NULL) {
         ngx_log_error(NGX_LOG_ERR, c->log, 0, "failed to create quic connection");
@@ -202,12 +203,17 @@ ngx_quic_handshake(ngx_connection_t *c)
     size_t    buf_len;
     ssize_t   done;
 
+    quiche_recv_info recv_info = {
+        c->sockaddr,
+        c->socklen,
+    };
+
     /* Process the client's Initial packet, which was saved into c->buffer by
      * ngx_event_recvmsg(). */
     buf = c->buffer->pos;
     buf_len = ngx_buf_size(c->buffer);
 
-    done = quiche_conn_recv(c->quic->conn, buf, buf_len);
+    done = quiche_conn_recv(c->quic->conn, buf, buf_len, &recv_info);
 
     if ((done < 0) && (done != QUICHE_ERR_DONE)) {
         ngx_log_debug1(NGX_LOG_DEBUG_EVENT, c->log, 0,
@@ -258,7 +264,12 @@ ngx_quic_read_handler(ngx_event_t *rev)
             return;
         }
 
-        ssize_t done = quiche_conn_recv(c->quic->conn, buf, n);
+        quiche_recv_info recv_info = {
+            c->sockaddr,
+            c->socklen,
+        };
+
+        ssize_t done = quiche_conn_recv(c->quic->conn, buf, n, &recv_info);
 
         if (done == QUICHE_ERR_DONE) {
             break;
@@ -297,6 +308,7 @@ static void
 ngx_quic_write_handler(ngx_event_t *wev)
 {
     ngx_connection_t   *c;
+    quiche_send_info    send_info;
     static uint8_t      out[MAX_DATAGRAM_SIZE];
 
     c = wev->data;
@@ -320,7 +332,8 @@ ngx_quic_write_handler(ngx_event_t *wev)
     }
 
     for (;;) {
-        ssize_t written = quiche_conn_send(c->quic->conn, out, sizeof(out));
+        ssize_t written = quiche_conn_send(c->quic->conn, out, sizeof(out),
+                                           &send_info);
 
         if (written == QUICHE_ERR_DONE) {
             ngx_log_debug0(NGX_LOG_DEBUG_EVENT, c->log, 0, "quic done writing");
@@ -440,8 +453,9 @@ ngx_quic_handshake_completed(ngx_connection_t *c)
 ngx_int_t
 ngx_quic_shutdown(ngx_connection_t *c)
 {
-    ssize_t         written;
-    static uint8_t  out[MAX_DATAGRAM_SIZE];
+    ssize_t           written;
+    quiche_send_info  send_info;
+    static uint8_t    out[MAX_DATAGRAM_SIZE];
 
     /* Connection is closed, free memory. */
     if (quiche_conn_is_closed(c->quic->conn)) {
@@ -466,7 +480,7 @@ ngx_quic_shutdown(ngx_connection_t *c)
     /* Try sending a packet in order to flush pending frames (CONNECTION_CLOSE
      * for example), but ignore errors as we are already closing the connection
      * anyway. */
-    written = quiche_conn_send(c->quic->conn, out, sizeof(out));
+    written = quiche_conn_send(c->quic->conn, out, sizeof(out), &send_info);
 
     if (written > 0) {
         ngx_quic_send_udp_packet(c, out, written);
