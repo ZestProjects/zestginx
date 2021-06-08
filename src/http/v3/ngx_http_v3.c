@@ -354,6 +354,8 @@ static void
 ngx_http_v3_handler(ngx_connection_t *c)
 {
     ngx_chain_t                out;
+    ngx_connection_t          *fc;
+    ngx_http_request_t        *r;
     ngx_http_v3_connection_t  *h3c;
     ngx_http_v3_stream_t      *stream;
 
@@ -434,6 +436,29 @@ ngx_http_v3_handler(ngx_connection_t *c)
 
                     stream->in_closed = 1;
                 }
+
+                break;
+            }
+
+            case QUICHE_H3_EVENT_RESET: {
+                /* Lookup stream. If there isn't one, it means it has already
+                 * been closed, so ignore the event. */
+                stream = ngx_http_v3_stream_lookup(h3c, stream_id);
+
+                if (stream != NULL && !stream->in_closed) {
+                    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, c->log, 0,
+                                   "http3 reset");
+
+                    r = stream->request;
+                    fc = r->connection;
+
+                    fc->error = 1;
+
+                    ngx_post_event(stream->request->connection->read,
+                                   &ngx_posted_events);
+                }
+
+                stream->in_closed = 1;
 
                 break;
             }
@@ -1876,12 +1901,20 @@ ngx_http_v3_recv_body(ngx_connection_t *c, u_char *buf, size_t size)
     r = c->data;
     h3c = r->qstream->connection;
 
+    if (c->error) {
+        rev->ready = 0;
+
+        return NGX_ERROR;
+    }
+
     n = quiche_h3_recv_body(h3c->h3, c->quic->conn, r->qstream->id, buf, size);
 
     ngx_log_debug2(NGX_LOG_DEBUG_EVENT, c->log, 0,
                    "http3 body recv: %z of %uz", n, size);
 
     if (quiche_conn_stream_finished(c->quic->conn, r->qstream->id)) {
+        rev->ready = 0;
+
         /* Re-schedule connection read event to poll for Finished event. */
         ngx_post_event(h3c->connection->read, &ngx_posted_events);
     }
@@ -1908,15 +1941,12 @@ ngx_http_v3_recv_body(ngx_connection_t *c, u_char *buf, size_t size)
         n = NGX_AGAIN;
 
     } else {
-        /* n = ngx_connection_error(c, err, "recv() failed"); */
+        rev->error = 1;
+
         n = NGX_ERROR;
     }
 
     rev->ready = 0;
-
-    if (n == NGX_ERROR) {
-        rev->error = 1;
-    }
 
     return n;
 }
