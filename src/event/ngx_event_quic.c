@@ -603,6 +603,8 @@ ngx_quic_send_udp_packet(ngx_connection_t *c, uint8_t *buf, size_t len)
     out_chain.buf = &out_buf;
     out_chain.next = NULL;
 
+    c->write->ready = 1;
+
     cl = c->send_chain(c, &out_chain, 0);
 
     if (cl != NULL) {

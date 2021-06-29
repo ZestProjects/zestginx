@@ -1291,6 +1291,10 @@ ngx_http_v3_request_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
             break;
         }
 
+        if (ngx_buf_size(cl->buf) == 0) {
+            continue;
+        }
+
         tl = ngx_chain_get_free_buf(r->pool, &rb->free);
         if (tl == NULL) {
             return NGX_HTTP_INTERNAL_SERVER_ERROR;
