@@ -1279,7 +1279,12 @@ ngx_http_v3_request_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                        "http3 request body filter");
 
-        rb->rest = clcf->client_body_buffer_size;
+        if (r->headers_in.chunked) {
+            rb->rest = clcf->client_body_buffer_size;
+            r->headers_in.content_length_n = 0;
+        } else {
+            rb->rest = r->headers_in.content_length_n;
+        }
     }
 
     out = NULL;
