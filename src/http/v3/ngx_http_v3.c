@@ -456,9 +456,9 @@ ngx_http_v3_handler(ngx_connection_t *c)
 
                     ngx_post_event(stream->request->connection->read,
                                    &ngx_posted_events);
-                }
 
-                stream->in_closed = 1;
+                    stream->in_closed = 1;
+                }
 
                 break;
             }
