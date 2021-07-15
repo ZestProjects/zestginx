@@ -2173,18 +2173,17 @@ ngx_http_v3_finalize_connection(ngx_http_v3_connection_t *h3c,
     c->read->handler = ngx_http_empty_handler;
     c->write->handler = ngx_http_empty_handler;
 
+    root = h3c->streams.root;
     sentinel = h3c->streams.sentinel;
 
+    if (root != sentinel) {
+        node = ngx_rbtree_min(h3c->streams.root, sentinel);
+    } else {
+        node = NULL;
+    }
+
     /* Close all pending streams / requests. */
-    for ( ;; ) {
-        root = h3c->streams.root;
-
-        if (root == sentinel) {
-            break;
-        }
-
-        node = ngx_rbtree_min(root, sentinel);
-
+    while (node != NULL) {
         stream = (ngx_http_v3_stream_t *) node;
 
         r = stream->request;
@@ -2206,6 +2205,8 @@ ngx_http_v3_finalize_connection(ngx_http_v3_connection_t *h3c,
         } else {
             ev = fc->read;
         }
+
+        node = ngx_rbtree_next(&h3c->streams, node);
 
         ev->eof = 1;
         ev->handler(ev);
