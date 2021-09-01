@@ -224,8 +224,8 @@ ngx_http_v3_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
         return NGX_CONF_ERROR;
     }
 
-    quiche_h3_config_set_max_header_list_size(conf->http3,
-                                              conf->max_header_size);
+    quiche_h3_config_set_max_field_section_size(conf->http3,
+                                                conf->max_header_size);
 
     cln = ngx_pool_cleanup_add(cf->pool, 0);
     if (cln == NULL) {
