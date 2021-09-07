@@ -361,6 +361,7 @@ ngx_http_init_connection(ngx_connection_t *c)
 
         /* We already have a UDP packet in the connection buffer, so we don't
          * need to wait for another read event to kick-off the handshake. */
+        cscf = ngx_http_get_module_srv_conf(hc->conf_ctx, ngx_http_core_module);
         ngx_add_timer(rev, cscf->client_header_timeout);
         ngx_http_quic_handshake(rev);
         return;
