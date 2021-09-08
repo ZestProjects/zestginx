@@ -26,23 +26,31 @@
 
 
   The data format used by the zlib library is described by RFCs (Request for
-  Comments) 1950 to 1952 in the files http://tools.ietf.org/html/rfc1950
+  Comments) 1950 to 1952 in the files https://tools.ietf.org/html/rfc1950
   (zlib format), rfc1951 (deflate format) and rfc1952 (gzip format).
 */
+
+#ifdef ZNGLIB_H_
+#  error Include zlib-ng.h for zlib-ng API or zlib.h for zlib-compat API but not both
+#endif
 
 #include <stdint.h>
 #include <stdarg.h>
 #include "zconf.h"
 
+#ifndef ZCONF_H
+#  error Missing zconf.h add binary output directory to include directories
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define ZLIBNG_VERSION "2.0.1"
-#define ZLIBNG_VERNUM 0x2010
+#define ZLIBNG_VERSION "2.0.5"
+#define ZLIBNG_VERNUM 0x2050
 #define ZLIBNG_VER_MAJOR 2
 #define ZLIBNG_VER_MINOR 0
-#define ZLIBNG_VER_REVISION 1
+#define ZLIBNG_VER_REVISION 5
 #define ZLIBNG_VER_SUBREVISION 0
 
 #define ZLIB_VERSION "1.2.11.zlib-ng"
@@ -274,7 +282,7 @@ Z_EXTERN int Z_EXPORT deflate(z_stream *strm, int flush);
   == 0), or after each call of deflate().  If deflate returns Z_OK and with
   zero avail_out, it must be called again after making room in the output
   buffer because there might be more output pending. See deflatePending(),
-  which can be used if desired to determine whether or not there is more ouput
+  which can be used if desired to determine whether or not there is more output
   in that case.
 
     Normally the parameter flush is set to Z_NO_FLUSH, which allows deflate to
@@ -656,7 +664,7 @@ Z_EXTERN int Z_EXPORT deflateGetDictionary (z_stream *strm, unsigned char *dicti
    to dictionary.  dictionary must have enough space, where 32768 bytes is
    always enough.  If deflateGetDictionary() is called with dictionary equal to
    Z_NULL, then only the dictionary length is returned, and nothing is copied.
-   Similary, if dictLength is Z_NULL, then it is not set.
+   Similarly, if dictLength is Z_NULL, then it is not set.
 
      deflateGetDictionary() may return a length less than the window size, even
    when more than the window size in input has been provided. It may return up
@@ -893,7 +901,7 @@ Z_EXTERN int Z_EXPORT inflateGetDictionary(z_stream *strm, unsigned char *dictio
    to dictionary.  dictionary must have enough space, where 32768 bytes is
    always enough.  If inflateGetDictionary() is called with dictionary equal to
    NULL, then only the dictionary length is returned, and nothing is copied.
-   Similary, if dictLength is NULL, then it is not set.
+   Similarly, if dictLength is NULL, then it is not set.
 
      inflateGetDictionary returns Z_OK on success, or Z_STREAM_ERROR if the
    stream state is inconsistent.
@@ -1184,6 +1192,8 @@ Z_EXTERN unsigned long Z_EXPORT zlibCompileFlags(void);
  */
 
 
+#ifndef Z_SOLO
+
                         /* utility functions */
 
 /*
@@ -1408,7 +1418,7 @@ Z_EXTERN size_t Z_EXPORT gzfread (void *buf, size_t size, size_t nitems, gzFile 
    provided, but could be inferred from the result of gztell().  This behavior
    is the same as the behavior of fread() implementations in common libraries,
    but it prevents the direct use of gzfread() to read a concurrently written
-   file, reseting and retrying on end-of-file, when size is not 1.
+   file, resetting and retrying on end-of-file, when size is not 1.
 */
 
 Z_EXTERN int Z_EXPORT gzwrite(gzFile file, void const *buf, unsigned len);
@@ -1638,6 +1648,7 @@ Z_EXTERN void Z_EXPORT gzclearerr(gzFile file);
    file that is being written concurrently.
 */
 
+#endif
 
                         /* checksum functions */
 
@@ -1755,6 +1766,7 @@ Z_EXTERN int Z_EXPORT inflateBackInit_(z_stream *strm, int windowBits, unsigned 
                         inflateBackInit_((strm), (windowBits), (window), ZLIB_VERSION, (int)sizeof(z_stream))
 
 
+#ifndef Z_SOLO
 /* gzgetc() macro and its supporting function and exposed data structure.  Note
  * that the real internal state is much larger than the exposed structure.
  * This abbreviated structure exposes just enough for the gzgetc() macro.  The
@@ -1785,8 +1797,9 @@ Z_EXTERN int Z_EXPORT gzgetc_(gzFile file);  /* backward compatibility */
    Z_EXTERN unsigned long Z_EXPORT crc32_combine64(unsigned long, unsigned long, z_off64_t);
    Z_EXTERN void Z_EXPORT crc32_combine_gen64(uint32_t *op, z_off64_t);
 #endif
+#endif
 
-#if !defined(ZLIB_INTERNAL) && defined(Z_WANT64)
+#if !defined(Z_INTERNAL) && defined(Z_WANT64)
 #    define gzopen gzopen64
 #    define gzseek gzseek64
 #    define gztell gztell64
@@ -1823,10 +1836,12 @@ Z_EXTERN unsigned long    Z_EXPORT inflateCodesUsed (z_stream *);
 Z_EXTERN int              Z_EXPORT inflateResetKeep (z_stream *);
 Z_EXTERN int              Z_EXPORT deflateResetKeep (z_stream *);
 
+#ifndef Z_SOLO
 #if defined(_WIN32)
     Z_EXTERN gzFile Z_EXPORT gzopen_w(const wchar_t *path, const char *mode);
 #endif
 Z_EXTERN int Z_EXPORTVA gzvprintf(gzFile file, const char *format, va_list va);
+#endif
 
 #ifdef __cplusplus
 }
