@@ -60,7 +60,8 @@
 //! ```no_run
 //! # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
 //! # let scid = quiche::ConnectionId::from_ref(&[0xba; 16]);
-//! # let mut conn = quiche::connect(None, &scid, &mut config).unwrap();
+//! # let from = "127.0.0.1:1234".parse().unwrap();
+//! # let mut conn = quiche::accept(&scid, None, from, &mut config).unwrap();
 //! # let h3_config = quiche::h3::Config::new()?;
 //! let h3_conn = quiche::h3::Connection::with_transport(&mut conn, &h3_config)?;
 //! # Ok::<(), quiche::h3::Error>(())
@@ -75,15 +76,16 @@
 //! ```no_run
 //! # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
 //! # let scid = quiche::ConnectionId::from_ref(&[0xba; 16]);
-//! # let mut conn = quiche::connect(None, &scid, &mut config).unwrap();
+//! # let to = "127.0.0.1:1234".parse().unwrap();
+//! # let mut conn = quiche::connect(None, &scid, to, &mut config).unwrap();
 //! # let h3_config = quiche::h3::Config::new()?;
 //! # let mut h3_conn = quiche::h3::Connection::with_transport(&mut conn, &h3_config)?;
 //! let req = vec![
-//!     quiche::h3::Header::new(":method", "GET"),
-//!     quiche::h3::Header::new(":scheme", "https"),
-//!     quiche::h3::Header::new(":authority", "quic.tech"),
-//!     quiche::h3::Header::new(":path", "/"),
-//!     quiche::h3::Header::new("user-agent", "quiche"),
+//!     quiche::h3::Header::new(b":method", b"GET"),
+//!     quiche::h3::Header::new(b":scheme", b"https"),
+//!     quiche::h3::Header::new(b":authority", b"quic.tech"),
+//!     quiche::h3::Header::new(b":path", b"/"),
+//!     quiche::h3::Header::new(b"user-agent", b"quiche"),
 //! ];
 //!
 //! h3_conn.send_request(&mut conn, &req, true)?;
@@ -96,15 +98,16 @@
 //! ```no_run
 //! # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
 //! # let scid = quiche::ConnectionId::from_ref(&[0xba; 16]);
-//! # let mut conn = quiche::connect(None, &scid, &mut config).unwrap();
+//! # let to = "127.0.0.1:1234".parse().unwrap();
+//! # let mut conn = quiche::connect(None, &scid, to, &mut config).unwrap();
 //! # let h3_config = quiche::h3::Config::new()?;
 //! # let mut h3_conn = quiche::h3::Connection::with_transport(&mut conn, &h3_config)?;
 //! let req = vec![
-//!     quiche::h3::Header::new(":method", "GET"),
-//!     quiche::h3::Header::new(":scheme", "https"),
-//!     quiche::h3::Header::new(":authority", "quic.tech"),
-//!     quiche::h3::Header::new(":path", "/"),
-//!     quiche::h3::Header::new("user-agent", "quiche"),
+//!     quiche::h3::Header::new(b":method", b"GET"),
+//!     quiche::h3::Header::new(b":scheme", b"https"),
+//!     quiche::h3::Header::new(b":authority", b"quic.tech"),
+//!     quiche::h3::Header::new(b":path", b"/"),
+//!     quiche::h3::Header::new(b"user-agent", b"quiche"),
 //! ];
 //!
 //! let stream_id = h3_conn.send_request(&mut conn, &req, false)?;
@@ -126,7 +129,8 @@
 //!
 //! # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
 //! # let scid = quiche::ConnectionId::from_ref(&[0xba; 16]);
-//! # let mut conn = quiche::accept(&scid, None, &mut config).unwrap();
+//! # let from = "127.0.0.1:1234".parse().unwrap();
+//! # let mut conn = quiche::accept(&scid, None, from, &mut config).unwrap();
 //! # let h3_config = quiche::h3::Config::new()?;
 //! # let mut h3_conn = quiche::h3::Connection::with_transport(&mut conn, &h3_config)?;
 //! loop {
@@ -135,15 +139,15 @@
 //!             let mut headers = list.into_iter();
 //!
 //!             // Look for the request's method.
-//!             let method = headers.find(|h| h.name() == ":method").unwrap();
+//!             let method = headers.find(|h| h.name() == b":method").unwrap();
 //!
 //!             // Look for the request's path.
-//!             let path = headers.find(|h| h.name() == ":path").unwrap();
+//!             let path = headers.find(|h| h.name() == b":path").unwrap();
 //!
-//!             if method.value() == "GET" && path.value() == "/" {
+//!             if method.value() == b"GET" && path.value() == b"/" {
 //!                 let resp = vec![
-//!                     quiche::h3::Header::new(":status", &200.to_string()),
-//!                     quiche::h3::Header::new("server", "quiche"),
+//!                     quiche::h3::Header::new(b":status", 200.to_string().as_bytes()),
+//!                     quiche::h3::Header::new(b"server", b"quiche"),
 //!                 ];
 //!
 //!                 h3_conn.send_response(&mut conn, stream_id, &resp, false)?;
@@ -158,6 +162,10 @@
 //!
 //!         Ok((stream_id, quiche::h3::Event::Finished)) => {
 //!             // Peer terminated stream, handle it.
+//!         },
+//!
+//!         Ok((stream_id, quiche::h3::Event::Reset(err))) => {
+//!             // Peer reset the stream, handle it.
 //!         },
 //!
 //!         Ok((_flow_id, quiche::h3::Event::Datagram)) => (),
@@ -187,15 +195,17 @@
 //!
 //! # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
 //! # let scid = quiche::ConnectionId::from_ref(&[0xba; 16]);
-//! # let mut conn = quiche::connect(None, &scid, &mut config).unwrap();
+//! # let to = "127.0.0.1:1234".parse().unwrap();
+//! # let mut conn = quiche::connect(None, &scid, to, &mut config).unwrap();
 //! # let h3_config = quiche::h3::Config::new()?;
 //! # let mut h3_conn = quiche::h3::Connection::with_transport(&mut conn, &h3_config)?;
 //! loop {
 //!     match h3_conn.poll(&mut conn) {
 //!         Ok((stream_id, quiche::h3::Event::Headers{list, has_body})) => {
-//!             let status = list.iter().find(|h| h.name() == ":status").unwrap();
+//!             let status = list.iter().find(|h| h.name() == b":status").unwrap();
 //!             println!("Received {} response on stream {}",
-//!                      status.value(), stream_id);
+//!                      std::str::from_utf8(status.value()).unwrap(),
+//!                      stream_id);
 //!         },
 //!
 //!         Ok((stream_id, quiche::h3::Event::Data)) => {
@@ -212,6 +222,10 @@
 //!
 //!         Ok((stream_id, quiche::h3::Event::Finished)) => {
 //!             // Peer terminated stream, handle it.
+//!         },
+//!
+//!         Ok((stream_id, quiche::h3::Event::Reset(err))) => {
+//!             // Peer reset the stream, handle it.
 //!         },
 //!
 //!         Ok((_flow_id, quiche::h3::Event::Datagram)) => (),
@@ -275,7 +289,7 @@ use crate::octets;
 ///
 /// [`Config::set_application_protos()`]:
 /// ../struct.Config.html#method.set_application_protos
-pub const APPLICATION_PROTOCOL: &[u8] = b"\x05h3-29\x05h3-28\x05h3-27";
+pub const APPLICATION_PROTOCOL: &[u8] = b"\x02h3\x05h3-29\x05h3-28\x05h3-27";
 
 // The offset used when converting HTTP/3 urgency to quiche urgency.
 const PRIORITY_URGENCY_OFFSET: u8 = 124;
@@ -443,7 +457,7 @@ impl std::convert::From<octets::BufferTooShortError> for Error {
 
 /// An HTTP/3 configuration.
 pub struct Config {
-    max_header_list_size: Option<u64>,
+    max_field_section_size: Option<u64>,
     qpack_max_table_capacity: Option<u64>,
     qpack_blocked_streams: Option<u64>,
 }
@@ -452,13 +466,13 @@ impl Config {
     /// Creates a new configuration object with default settings.
     pub fn new() -> Result<Config> {
         Ok(Config {
-            max_header_list_size: None,
+            max_field_section_size: None,
             qpack_max_table_capacity: None,
             qpack_blocked_streams: None,
         })
     }
 
-    /// Sets the `SETTINGS_MAX_HEADER_LIST_SIZE` setting.
+    /// Sets the `SETTINGS_MAX_FIELD_SECTION_SIZE` setting.
     ///
     /// By default no limit is enforced. When a request whose headers exceed
     /// the limit set by the application is received, the call to the [`poll()`]
@@ -467,8 +481,8 @@ impl Config {
     ///
     /// [`poll()`]: struct.Connection.html#method.poll
     /// [`Error::ExcessiveLoad`]: enum.Error.html#variant.ExcessiveLoad
-    pub fn set_max_header_list_size(&mut self, v: u64) {
-        self.max_header_list_size = Some(v);
+    pub fn set_max_field_section_size(&mut self, v: u64) {
+        self.max_field_section_size = Some(v);
     }
 
     /// Sets the `SETTINGS_QPACK_MAX_TABLE_CAPACITY` setting.
@@ -489,52 +503,52 @@ impl Config {
 /// A trait for types with associated string name and value.
 pub trait NameValue {
     /// Returns the object's name.
-    fn name(&self) -> &str;
+    fn name(&self) -> &[u8];
 
     /// Returns the object's value.
-    fn value(&self) -> &str;
+    fn value(&self) -> &[u8];
 }
 
 /// An owned name-value pair representing a raw HTTP header.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Header(String, String);
+pub struct Header(Vec<u8>, Vec<u8>);
 
 impl Header {
     /// Creates a new header.
     ///
     /// Both `name` and `value` will be cloned.
-    pub fn new(name: &str, value: &str) -> Self {
-        Self(String::from(name), String::from(value))
+    pub fn new(name: &[u8], value: &[u8]) -> Self {
+        Self(name.to_vec(), value.to_vec())
     }
 }
 
 impl NameValue for Header {
-    fn name(&self) -> &str {
+    fn name(&self) -> &[u8] {
         &self.0
     }
 
-    fn value(&self) -> &str {
+    fn value(&self) -> &[u8] {
         &self.1
     }
 }
 
 /// A non-owned name-value pair representing a raw HTTP header.
 #[derive(Clone, Debug, PartialEq)]
-pub struct HeaderRef<'a>(&'a str, &'a str);
+pub struct HeaderRef<'a>(&'a [u8], &'a [u8]);
 
 impl<'a> HeaderRef<'a> {
     /// Creates a new header.
-    pub fn new(name: &'a str, value: &'a str) -> Self {
+    pub fn new(name: &'a [u8], value: &'a [u8]) -> Self {
         Self(name, value)
     }
 }
 
 impl<'a> NameValue for HeaderRef<'a> {
-    fn name(&self) -> &str {
+    fn name(&self) -> &[u8] {
         self.0
     }
 
-    fn value(&self) -> &str {
+    fn value(&self) -> &[u8] {
         self.1
     }
 }
@@ -568,6 +582,11 @@ pub enum Event {
     /// Stream was closed,
     Finished,
 
+    /// Stream was reset.
+    ///
+    /// The associated data represents the error code sent by the peer.
+    Reset(u64),
+
     /// DATAGRAM was received.
     ///
     /// This indicates that the application can use the [`recv_dgram()`] method
@@ -586,7 +605,7 @@ pub enum Event {
 }
 
 struct ConnectionSettings {
-    pub max_header_list_size: Option<u64>,
+    pub max_field_section_size: Option<u64>,
     pub qpack_max_table_capacity: Option<u64>,
     pub qpack_blocked_streams: Option<u64>,
     pub h3_datagram: Option<u64>,
@@ -649,14 +668,14 @@ impl Connection {
             streams: HashMap::new(),
 
             local_settings: ConnectionSettings {
-                max_header_list_size: config.max_header_list_size,
+                max_field_section_size: config.max_field_section_size,
                 qpack_max_table_capacity: config.qpack_max_table_capacity,
                 qpack_blocked_streams: config.qpack_blocked_streams,
                 h3_datagram,
             },
 
             peer_settings: ConnectionSettings {
-                max_header_list_size: None,
+                max_field_section_size: None,
                 qpack_max_table_capacity: None,
                 qpack_blocked_streams: None,
                 h3_datagram: None,
@@ -695,13 +714,27 @@ impl Connection {
     ///
     /// This will also initiate the HTTP/3 handshake with the peer by opening
     /// all control streams (including QPACK) and sending the local settings.
+    ///
+    /// On success the new connection is returned.
+    ///
+    /// The [`StreamLimit`] error is returned when the HTTP/3 control stream
+    /// cannot be created.
+    ///
+    /// [`StreamLimit`]: ../enum.Error.html#variant.InvalidState
     pub fn with_transport(
         conn: &mut super::Connection, config: &Config,
     ) -> Result<Connection> {
         let mut http3_conn =
             Connection::new(config, conn.is_server, conn.dgram_enabled())?;
 
-        http3_conn.send_settings(conn)?;
+        match http3_conn.send_settings(conn) {
+            Ok(_) => (),
+
+            Err(e) => {
+                conn.close(true, e.to_wire(), b"Error opening control stream")?;
+                return Err(e);
+            },
+        };
 
         // Try opening QPACK streams, but ignore errors if it fails since we
         // don't need them right now.
@@ -830,9 +863,12 @@ impl Connection {
                 // TODO: this also detects when u is not an sh-integer and
                 // clamps it in the same way. A real structured header parser
                 // would actually fail to parse.
-                let mut u =
-                    i64::from_str_radix(param.rsplit('=').next().unwrap(), 10)
-                        .unwrap_or(7);
+                let mut u = param
+                    .rsplit('=')
+                    .next()
+                    .unwrap()
+                    .parse::<i64>()
+                    .unwrap_or(7);
 
                 if !(0..=7).contains(&u) {
                     u = 7;
@@ -861,7 +897,7 @@ impl Connection {
         let mut header_block = vec![0; headers_len];
         let len = self
             .qpack_encoder
-            .encode(&headers, &mut header_block)
+            .encode(headers, &mut header_block)
             .map_err(|_| Error::InternalError)?;
 
         header_block.truncate(len);
@@ -966,6 +1002,11 @@ impl Connection {
             },
         };
 
+        // Avoid sending 0-length DATA frames when the fin flag is false.
+        if body.is_empty() && !fin {
+            return Err(Error::Done);
+        }
+
         let overhead = octets::varint_len(frame::DATA_FRAME_TYPE_ID) +
             octets::varint_len(body.len() as u64);
 
@@ -981,10 +1022,8 @@ impl Connection {
             },
         };
 
-        // Make sure there is enough capacity to send the frame header and at
-        // least one byte of frame payload (this to avoid sending 0-length DATA
-        // frames).
-        if stream_cap <= overhead {
+        // Make sure there is enough capacity to send the DATA frame header.
+        if stream_cap < overhead {
             return Err(Error::Done);
         }
 
@@ -994,6 +1033,11 @@ impl Connection {
         // If we can't send the entire body, set the fin flag to false so the
         // application can try again later.
         let fin = if body_len != body.len() { false } else { fin };
+
+        // Again, avoid sending 0-length DATA frames when the fin flag is false.
+        if body_len == 0 && !fin {
+            return Err(Error::Done);
+        }
 
         trace!(
             "{} tx frm DATA stream={} len={} fin={}",
@@ -1042,7 +1086,7 @@ impl Connection {
         b.put_varint(flow_id)?;
         b.put_bytes(buf)?;
 
-        conn.dgram_send(&d)?;
+        conn.dgram_send_vec(d)?;
 
         Ok(())
     }
@@ -1174,7 +1218,7 @@ impl Connection {
         // While body is being received, the stream is marked as finished only
         // when all data is read by the application.
         if conn.stream_finished(stream_id) {
-            self.finished_streams.push_back(stream_id);
+            self.process_finished_stream(stream_id);
         }
 
         if total == 0 {
@@ -1223,7 +1267,7 @@ impl Connection {
         // When connection close is initiated by the local application (e.g. due
         // to a protocol error), the connection itself might be in a broken
         // state, so return early.
-        if conn.error.is_some() || conn.app_error.is_some() {
+        if conn.local_error.is_some() {
             return Err(Error::Done);
         }
 
@@ -1281,6 +1325,11 @@ impl Connection {
 
                 Err(Error::Done) => None,
 
+                // Return early if the stream was reset, to avoid returning
+                // a Finished event later as well.
+                Err(Error::TransportError(crate::Error::StreamReset(e))) =>
+                    return Ok((s, Event::Reset(e))),
+
                 Err(e) => return Err(e),
             };
 
@@ -1318,9 +1367,13 @@ impl Connection {
     pub fn send_goaway(
         &mut self, conn: &mut super::Connection, id: u64,
     ) -> Result<()> {
+        let mut id = id;
+
+        // TODO: server push
+        //
+        // In the meantime always send 0 from client.
         if !self.is_server {
-            // TODO: server push
-            return Ok(());
+            id = 0;
         }
 
         if self.is_server && id % 4 != 0 {
@@ -1504,7 +1557,7 @@ impl Connection {
         };
 
         let frame = frame::Frame::Settings {
-            max_header_list_size: self.local_settings.max_header_list_size,
+            max_field_section_size: self.local_settings.max_field_section_size,
             qpack_max_table_capacity: self
                 .local_settings
                 .qpack_max_table_capacity,
@@ -1799,6 +1852,8 @@ impl Connection {
 
                     break;
                 },
+
+                stream::State::Finished => break,
             }
         }
 
@@ -1806,15 +1861,22 @@ impl Connection {
     }
 
     fn process_finished_stream(&mut self, stream_id: u64) {
-        let stream = match self.streams.get(&stream_id) {
+        let stream = match self.streams.get_mut(&stream_id) {
             Some(v) => v,
 
             None => return,
         };
 
+        if stream.state() == stream::State::Finished {
+            return;
+        }
+
         match stream.ty() {
-            Some(stream::Type::Request) | Some(stream::Type::Push) =>
-                self.finished_streams.push_back(stream_id),
+            Some(stream::Type::Request) | Some(stream::Type::Push) => {
+                stream.finished();
+
+                self.finished_streams.push_back(stream_id);
+            },
 
             _ => (),
         };
@@ -1833,14 +1895,14 @@ impl Connection {
 
         match frame {
             frame::Frame::Settings {
-                max_header_list_size,
+                max_field_section_size,
                 qpack_max_table_capacity,
                 qpack_blocked_streams,
                 h3_datagram,
                 ..
             } => {
                 self.peer_settings = ConnectionSettings {
-                    max_header_list_size,
+                    max_field_section_size,
                     qpack_max_table_capacity,
                     qpack_blocked_streams,
                     h3_datagram,
@@ -1871,11 +1933,11 @@ impl Connection {
                     return Err(Error::FrameUnexpected);
                 }
 
-                // Use "infinite" as default value for max_header_list_size if
+                // Use "infinite" as default value for max_field_section_size if
                 // it is not configured by the application.
                 let max_size = self
                     .local_settings
-                    .max_header_list_size
+                    .max_field_section_size
                     .unwrap_or(std::u64::MAX);
 
                 let headers = match self
@@ -2083,6 +2145,7 @@ pub mod testing {
             config.set_initial_max_streams_uni(5);
             config.verify_peer(false);
             config.enable_dgram(true, 3, 3);
+            config.set_ack_delay_exponent(8);
 
             let h3_config = Config::new()?;
             Session::with_configs(&mut config, &h3_config)
@@ -2096,8 +2159,8 @@ pub mod testing {
             let server_dgram = pipe.server.dgram_enabled();
             Ok(Session {
                 pipe,
-                client: Connection::new(&h3_config, false, client_dgram)?,
-                server: Connection::new(&h3_config, true, server_dgram)?,
+                client: Connection::new(h3_config, false, client_dgram)?,
+                server: Connection::new(h3_config, true, server_dgram)?,
             })
         }
 
@@ -2172,11 +2235,11 @@ pub mod testing {
         /// On success it returns the newly allocated stream and the headers.
         pub fn send_request(&mut self, fin: bool) -> Result<(u64, Vec<Header>)> {
             let req = vec![
-                Header::new(":method", "GET"),
-                Header::new(":scheme", "https"),
-                Header::new(":authority", "quic.tech"),
-                Header::new(":path", "/test"),
-                Header::new("user-agent", "quiche-test"),
+                Header::new(b":method", b"GET"),
+                Header::new(b":scheme", b"https"),
+                Header::new(b":authority", b"quic.tech"),
+                Header::new(b":path", b"/test"),
+                Header::new(b"user-agent", b"quiche-test"),
             ];
 
             let stream =
@@ -2194,8 +2257,8 @@ pub mod testing {
             &mut self, stream: u64, fin: bool,
         ) -> Result<Vec<Header>> {
             let resp = vec![
-                Header::new(":status", "200"),
-                Header::new("server", "quiche-test"),
+                Header::new(b":status", b"200"),
+                Header::new(b"server", b"quiche-test"),
             ];
 
             self.server.send_response(
@@ -2987,12 +3050,12 @@ mod tests {
         let mut s = Session::default().unwrap();
         s.handshake().unwrap();
 
-        s.client.send_goaway(&mut s.pipe.client, 1).unwrap();
+        s.client.send_goaway(&mut s.pipe.client, 100).unwrap();
 
         s.advance().ok();
 
         // TODO: server push
-        assert_eq!(s.poll_server(), Err(Error::Done));
+        assert_eq!(s.poll_server(), Ok((0, Event::GoAway)));
     }
 
     #[test]
@@ -3213,11 +3276,11 @@ mod tests {
         s.handshake().unwrap();
 
         let req = vec![
-            Header::new(":method", "GET"),
-            Header::new(":scheme", "https"),
-            Header::new(":authority", "quic.tech"),
-            Header::new(":path", "/test"),
-            Header::new("user-agent", "quiche-test"),
+            Header::new(b":method", b"GET"),
+            Header::new(b":scheme", b"https"),
+            Header::new(b":authority", b"quic.tech"),
+            Header::new(b":path", b"/test"),
+            Header::new(b"user-agent", b"quiche-test"),
         ];
 
         assert_eq!(
@@ -3348,18 +3411,18 @@ mod tests {
         config.verify_peer(false);
 
         let mut h3_config = Config::new().unwrap();
-        h3_config.set_max_header_list_size(65);
+        h3_config.set_max_field_section_size(65);
 
         let mut s = Session::with_configs(&mut config, &mut h3_config).unwrap();
 
         s.handshake().unwrap();
 
         let req = vec![
-            Header::new(":method", "GET"),
-            Header::new(":scheme", "https"),
-            Header::new(":authority", "quic.tech"),
-            Header::new(":path", "/test"),
-            Header::new("aaaaaaa", "aaaaaaaa"),
+            Header::new(b":method", b"GET"),
+            Header::new(b":scheme", b"https"),
+            Header::new(b":authority", b"quic.tech"),
+            Header::new(b":path", b"/test"),
+            Header::new(b"aaaaaaa", b"aaaaaaaa"),
         ];
 
         let stream = s
@@ -3374,8 +3437,8 @@ mod tests {
         assert_eq!(s.poll_server(), Err(Error::ExcessiveLoad));
 
         assert_eq!(
-            s.pipe.server.app_error,
-            Some(Error::to_wire(Error::ExcessiveLoad))
+            s.pipe.server.local_error.as_ref().unwrap().error_code,
+            Error::to_wire(Error::ExcessiveLoad)
         );
     }
 
@@ -3386,11 +3449,11 @@ mod tests {
         s.handshake().unwrap();
 
         let req = vec![
-            Header::new(":method", "GET"),
-            Header::new(":scheme", "https"),
-            Header::new(":authority", "quic.tech"),
-            Header::new(":path", "/test"),
-            Header::new("user-agent", "quiche-test"),
+            Header::new(b":method", b"GET"),
+            Header::new(b":scheme", b"https"),
+            Header::new(b":authority", b"quic.tech"),
+            Header::new(b":path", b"/test"),
+            Header::new(b"user-agent", b"quiche-test"),
         ];
 
         // We need to open all streams in the same flight, so we can't use the
@@ -3491,10 +3554,10 @@ mod tests {
         s.handshake().unwrap();
 
         let req = vec![
-            Header::new(":method", "GET"),
-            Header::new(":scheme", "https"),
-            Header::new(":authority", "quic.tech"),
-            Header::new(":path", "/test"),
+            Header::new(b":method", b"GET"),
+            Header::new(b":scheme", b"https"),
+            Header::new(b":authority", b"quic.tech"),
+            Header::new(b":path", b"/test"),
         ];
 
         assert_eq!(s.client.send_request(&mut s.pipe.client, &req, true), Ok(0));
@@ -3512,6 +3575,61 @@ mod tests {
     }
 
     #[test]
+    /// Test handling of 0-length DATA writes with and without fin.
+    fn zero_length_data() {
+        let mut s = Session::default().unwrap();
+        s.handshake().unwrap();
+
+        let (stream, req) = s.send_request(false).unwrap();
+
+        assert_eq!(
+            s.client.send_body(&mut s.pipe.client, 0, b"", false),
+            Err(Error::Done)
+        );
+        assert_eq!(s.client.send_body(&mut s.pipe.client, 0, b"", true), Ok(0));
+
+        s.advance().ok();
+
+        let mut recv_buf = vec![0; 100];
+
+        let ev_headers = Event::Headers {
+            list: req,
+            has_body: true,
+        };
+
+        assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
+
+        assert_eq!(s.poll_server(), Ok((stream, Event::Data)));
+        assert_eq!(s.recv_body_server(stream, &mut recv_buf), Err(Error::Done));
+
+        assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
+        assert_eq!(s.poll_server(), Err(Error::Done));
+
+        let resp = s.send_response(stream, false).unwrap();
+
+        assert_eq!(
+            s.server.send_body(&mut s.pipe.server, 0, b"", false),
+            Err(Error::Done)
+        );
+        assert_eq!(s.server.send_body(&mut s.pipe.server, 0, b"", true), Ok(0));
+
+        s.advance().ok();
+
+        let ev_headers = Event::Headers {
+            list: resp,
+            has_body: true,
+        };
+
+        assert_eq!(s.poll_client(), Ok((stream, ev_headers)));
+
+        assert_eq!(s.poll_client(), Ok((stream, Event::Data)));
+        assert_eq!(s.recv_body_client(stream, &mut recv_buf), Err(Error::Done));
+
+        assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
+        assert_eq!(s.poll_client(), Err(Error::Done));
+    }
+
+    #[test]
     /// Tests that blocked 0-length DATA writes are reported correctly.
     fn zero_length_data_blocked() {
         let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
@@ -3522,7 +3640,7 @@ mod tests {
             .load_priv_key_from_pem_file("examples/cert.key")
             .unwrap();
         config.set_application_protos(b"\x02h3").unwrap();
-        config.set_initial_max_data(70);
+        config.set_initial_max_data(69);
         config.set_initial_max_stream_data_bidi_local(150);
         config.set_initial_max_stream_data_bidi_remote(150);
         config.set_initial_max_stream_data_uni(150);
@@ -3537,10 +3655,10 @@ mod tests {
         s.handshake().unwrap();
 
         let req = vec![
-            Header::new(":method", "GET"),
-            Header::new(":scheme", "https"),
-            Header::new(":authority", "quic.tech"),
-            Header::new(":path", "/test"),
+            Header::new(b":method", b"GET"),
+            Header::new(b":scheme", b"https"),
+            Header::new(b":authority", b"quic.tech"),
+            Header::new(b":path", b"/test"),
         ];
 
         assert_eq!(
@@ -3638,7 +3756,7 @@ mod tests {
         );
 
         let settings = frame::Frame::Settings {
-            max_header_list_size: None,
+            max_field_section_size: None,
             qpack_max_table_capacity: None,
             qpack_blocked_streams: None,
             h3_datagram: Some(1),
@@ -4121,6 +4239,32 @@ mod tests {
     }
 
     #[test]
+    /// Tests that streams are marked as finished only once.
+    fn finished_once() {
+        let mut s = Session::default().unwrap();
+        s.handshake().unwrap();
+
+        let (stream, req) = s.send_request(false).unwrap();
+        let body = s.send_body_client(stream, true).unwrap();
+
+        let mut recv_buf = vec![0; body.len()];
+
+        let ev_headers = Event::Headers {
+            list: req,
+            has_body: true,
+        };
+
+        assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
+        assert_eq!(s.poll_server(), Ok((stream, Event::Data)));
+
+        assert_eq!(s.recv_body_server(stream, &mut recv_buf), Ok(body.len()));
+        assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
+
+        assert_eq!(s.recv_body_server(stream, &mut recv_buf), Err(Error::Done));
+        assert_eq!(s.poll_server(), Err(Error::Done));
+    }
+
+    #[test]
     /// Tests that the Data event is properly re-armed.
     fn data_event_rearm() {
         let bytes = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
@@ -4185,7 +4329,7 @@ mod tests {
         // Send more data, then HEADERS, then more data.
         let body = s.send_body_client(stream, false).unwrap();
 
-        let trailers = vec![Header::new("hello", "world")];
+        let trailers = vec![Header::new(b"hello", b"world")];
 
         s.client
             .send_headers(&mut s.pipe.client, stream, &trailers, false)
@@ -4359,6 +4503,183 @@ mod tests {
 
         assert_eq!(s.recv_body_server(stream, &mut recv_buf), Ok(body.len()));
         assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
+    }
+
+    #[test]
+    fn reset_stream() {
+        let mut buf = [0; 65535];
+
+        let mut s = Session::default().unwrap();
+        s.handshake().unwrap();
+
+        // Client sends request.
+        let (stream, req) = s.send_request(false).unwrap();
+
+        let ev_headers = Event::Headers {
+            list: req,
+            has_body: true,
+        };
+
+        // Server sends response and closes stream.
+        assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
+        assert_eq!(s.poll_server(), Err(Error::Done));
+
+        let resp = s.send_response(stream, true).unwrap();
+
+        let ev_headers = Event::Headers {
+            list: resp,
+            has_body: false,
+        };
+
+        assert_eq!(s.poll_client(), Ok((stream, ev_headers)));
+        assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
+        assert_eq!(s.poll_client(), Err(Error::Done));
+
+        // Client sends RESET_STREAM, closing stream.
+        let frames = [crate::frame::Frame::ResetStream {
+            stream_id: stream,
+            error_code: 42,
+            final_size: 68,
+        }];
+
+        let pkt_type = crate::packet::Type::Short;
+        assert_eq!(
+            s.pipe.send_pkt_to_server(pkt_type, &frames, &mut buf),
+            Ok(39)
+        );
+
+        // Server issues Reset event for the stream.
+        assert_eq!(s.poll_server(), Ok((stream, Event::Reset(42))));
+        assert_eq!(s.poll_server(), Err(Error::Done));
+
+        // Sending RESET_STREAM again shouldn't trigger another Reset event.
+        assert_eq!(
+            s.pipe.send_pkt_to_server(pkt_type, &frames, &mut buf),
+            Ok(39)
+        );
+
+        assert_eq!(s.poll_server(), Err(Error::Done));
+    }
+
+    #[test]
+    fn reset_finished_at_server() {
+        let mut s = Session::default().unwrap();
+        s.handshake().unwrap();
+
+        // Client sends HEADERS and doesn't fin
+        let (stream, _req) = s.send_request(false).unwrap();
+
+        // ..then Client sends RESET_STREAM
+        assert_eq!(
+            s.pipe.client.stream_shutdown(0, crate::Shutdown::Write, 0),
+            Ok(())
+        );
+
+        assert_eq!(s.pipe.advance(), Ok(()));
+
+        // Server receives just a reset
+        assert_eq!(s.poll_server(), Ok((stream, Event::Reset(0))));
+        assert_eq!(s.poll_server(), Err(Error::Done));
+
+        // Client sends HEADERS and fin
+        let (stream, req) = s.send_request(true).unwrap();
+
+        // ..then Client sends RESET_STREAM
+        assert_eq!(
+            s.pipe.client.stream_shutdown(4, crate::Shutdown::Write, 0),
+            Ok(())
+        );
+
+        let ev_headers = Event::Headers {
+            list: req,
+            has_body: false,
+        };
+
+        // Server receives headers and fin.
+        assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
+        assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
+        assert_eq!(s.poll_server(), Err(Error::Done));
+    }
+
+    #[test]
+    fn reset_finished_at_client() {
+        let mut buf = [0; 65535];
+        let mut s = Session::default().unwrap();
+        s.handshake().unwrap();
+
+        // Client sends HEADERS and doesn't fin
+        let (stream, req) = s.send_request(false).unwrap();
+
+        let ev_headers = Event::Headers {
+            list: req,
+            has_body: true,
+        };
+
+        // Server receives headers.
+        assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
+        assert_eq!(s.poll_server(), Err(Error::Done));
+
+        // Server sends response and doesn't fin
+        s.send_response(stream, false).unwrap();
+
+        assert_eq!(s.pipe.advance(), Ok(()));
+
+        // .. then Server sends RESET_STREAM
+        assert_eq!(
+            s.pipe
+                .server
+                .stream_shutdown(stream, crate::Shutdown::Write, 0),
+            Ok(())
+        );
+
+        assert_eq!(s.pipe.advance(), Ok(()));
+
+        // Client receives Reset only
+        assert_eq!(s.poll_client(), Ok((stream, Event::Reset(0))));
+        assert_eq!(s.poll_server(), Err(Error::Done));
+
+        // Client sends headers and fin.
+        let (stream, req) = s.send_request(true).unwrap();
+
+        let ev_headers = Event::Headers {
+            list: req,
+            has_body: false,
+        };
+
+        // Server receives headers and fin.
+        assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
+        assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
+        assert_eq!(s.poll_server(), Err(Error::Done));
+
+        // Server sends response and fin
+        let resp = s.send_response(stream, true).unwrap();
+
+        assert_eq!(s.pipe.advance(), Ok(()));
+
+        // ..then Server sends RESET_STREAM
+        let frames = [crate::frame::Frame::ResetStream {
+            stream_id: stream,
+            error_code: 42,
+            final_size: 68,
+        }];
+
+        let pkt_type = crate::packet::Type::Short;
+        assert_eq!(
+            s.pipe.send_pkt_to_server(pkt_type, &frames, &mut buf),
+            Ok(39)
+        );
+
+        assert_eq!(s.pipe.advance(), Ok(()));
+
+        let ev_headers = Event::Headers {
+            list: resp,
+            has_body: false,
+        };
+
+        // Client receives headers and fin.
+        assert_eq!(s.poll_client(), Ok((stream, ev_headers)));
+        assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
+        assert_eq!(s.poll_client(), Err(Error::Done));
     }
 }
 

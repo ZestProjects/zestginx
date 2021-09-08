@@ -155,6 +155,10 @@ pub enum Frame {
     Datagram {
         data: Vec<u8>,
     },
+
+    DatagramHeader {
+        length: usize,
+    },
 }
 
 impl Frame {
@@ -382,7 +386,7 @@ impl Frame {
             Frame::Crypto { data } => {
                 encode_crypto_header(data.off() as u64, data.len() as u64, b)?;
 
-                data.with(|s| b.put_bytes(s))?;
+                b.put_bytes(data)?;
             },
 
             Frame::CryptoHeader { .. } => (),
@@ -391,7 +395,7 @@ impl Frame {
                 b.put_varint(0x07)?;
 
                 b.put_varint(token.len() as u64)?;
-                b.put_bytes(&token)?;
+                b.put_bytes(token)?;
             },
 
             Frame::Stream { stream_id, data } => {
@@ -403,7 +407,7 @@ impl Frame {
                     b,
                 )?;
 
-                data.with(|s| b.put_bytes(s))?;
+                b.put_bytes(data)?;
             },
 
             Frame::StreamHeader { .. } => (),
@@ -517,16 +521,12 @@ impl Frame {
             },
 
             Frame::Datagram { data } => {
-                let mut ty: u8 = 0x30;
+                encode_dgram_header(data.len() as u64, b)?;
 
-                // Always encode length
-                ty |= 0x01;
-
-                b.put_varint(u64::from(ty))?;
-
-                b.put_varint(data.len() as u64)?;
                 b.put_bytes(data.as_ref())?;
             },
+
+            Frame::DatagramHeader { .. } => (),
         }
 
         Ok(before - b.cap())
@@ -723,8 +723,14 @@ impl Frame {
 
             Frame::Datagram { data } => {
                 1 + // frame type
-                octets::varint_len(data.len() as u64) + // length
+                2 + // length, always encode as 2-byte varint
                 data.len() // data
+            },
+
+            Frame::DatagramHeader { length } => {
+                1 + // frame type
+                2 + // length, always encode as 2-byte varint
+                *length // data
             },
         }
     }
@@ -740,176 +746,172 @@ impl Frame {
         )
     }
 
-    pub fn shrink_for_retransmission(&mut self) {
-        if let Frame::Datagram { data } = self {
-            *data = Vec::new();
-        }
-    }
-
     #[cfg(feature = "qlog")]
     pub fn to_qlog(&self) -> qlog::QuicFrame {
         match self {
-            Frame::Padding { .. } => qlog::QuicFrame::padding(),
+            Frame::Padding { .. } => qlog::QuicFrame::Padding,
 
-            Frame::Ping { .. } => qlog::QuicFrame::ping(),
+            Frame::Ping { .. } => qlog::QuicFrame::Ping,
 
             Frame::ACK { ack_delay, ranges } => {
                 let ack_ranges =
                     ranges.iter().map(|r| (r.start, r.end - 1)).collect();
-                qlog::QuicFrame::ack(
-                    Some(ack_delay.to_string()),
-                    Some(ack_ranges),
-                    None,
-                    None,
-                    None,
-                )
+                qlog::QuicFrame::Ack {
+                    ack_delay: Some(*ack_delay as f32 / 1000.0),
+                    acked_ranges: Some(ack_ranges),
+                    ect1: None,
+                    ect0: None,
+                    ce: None,
+                }
             },
 
             Frame::ResetStream {
                 stream_id,
                 error_code,
                 final_size,
-            } => qlog::QuicFrame::reset_stream(
-                stream_id.to_string(),
-                *error_code,
-                final_size.to_string(),
-            ),
+            } => qlog::QuicFrame::ResetStream {
+                stream_id: *stream_id,
+                error_code: *error_code,
+                final_size: *final_size,
+            },
 
             Frame::StopSending {
                 stream_id,
                 error_code,
-            } =>
-                qlog::QuicFrame::stop_sending(stream_id.to_string(), *error_code),
+            } => qlog::QuicFrame::StopSending {
+                stream_id: *stream_id,
+                error_code: *error_code,
+            },
 
-            Frame::Crypto { data } => qlog::QuicFrame::crypto(
-                data.off().to_string(),
-                data.len().to_string(),
-            ),
+            Frame::Crypto { data } => qlog::QuicFrame::Crypto {
+                offset: data.off(),
+                length: data.len() as u64,
+            },
 
-            Frame::CryptoHeader { offset, length } =>
-                qlog::QuicFrame::crypto(offset.to_string(), length.to_string()),
+            Frame::CryptoHeader { offset, length } => qlog::QuicFrame::Crypto {
+                offset: *offset,
+                length: *length as u64,
+            },
 
-            Frame::NewToken { token } => qlog::QuicFrame::new_token(
-                token.len().to_string(),
-                "TODO: https://github.com/quiclog/internet-drafts/issues/36"
-                    .to_string(),
-            ),
+            Frame::NewToken { token } => qlog::QuicFrame::NewToken {
+                length: token.len().to_string(),
+                token: "TODO: update to qlog-02 token format".to_string(),
+            },
 
-            Frame::Stream { stream_id, data } => qlog::QuicFrame::stream(
-                stream_id.to_string(),
-                data.off().to_string(),
-                data.len().to_string(),
-                data.fin(),
-                None,
-            ),
+            Frame::Stream { stream_id, data } => qlog::QuicFrame::Stream {
+                stream_id: *stream_id,
+                offset: data.off() as u64,
+                length: data.len() as u64,
+                fin: data.fin(),
+                raw: None,
+            },
 
             Frame::StreamHeader {
                 stream_id,
                 offset,
                 length,
                 fin,
-            } => qlog::QuicFrame::stream(
-                stream_id.to_string(),
-                offset.to_string(),
-                length.to_string(),
-                *fin,
-                None,
-            ),
+            } => qlog::QuicFrame::Stream {
+                stream_id: *stream_id,
+                offset: *offset,
+                length: *length as u64,
+                fin: *fin,
+                raw: None,
+            },
 
-            Frame::MaxData { max } => qlog::QuicFrame::max_data(max.to_string()),
+            Frame::MaxData { max } => qlog::QuicFrame::MaxData { maximum: *max },
 
             Frame::MaxStreamData { stream_id, max } =>
-                qlog::QuicFrame::max_stream_data(
-                    stream_id.to_string(),
-                    max.to_string(),
-                ),
+                qlog::QuicFrame::MaxStreamData {
+                    stream_id: *stream_id,
+                    maximum: *max,
+                },
 
-            Frame::MaxStreamsBidi { max } => qlog::QuicFrame::max_streams(
-                qlog::StreamType::Bidirectional,
-                max.to_string(),
-            ),
+            Frame::MaxStreamsBidi { max } => qlog::QuicFrame::MaxStreams {
+                stream_type: qlog::StreamType::Bidirectional,
+                maximum: *max,
+            },
 
-            Frame::MaxStreamsUni { max } => qlog::QuicFrame::max_streams(
-                qlog::StreamType::Unidirectional,
-                max.to_string(),
-            ),
+            Frame::MaxStreamsUni { max } => qlog::QuicFrame::MaxStreams {
+                stream_type: qlog::StreamType::Unidirectional,
+                maximum: *max,
+            },
 
             Frame::DataBlocked { limit } =>
-                qlog::QuicFrame::data_blocked(limit.to_string()),
+                qlog::QuicFrame::DataBlocked { limit: *limit },
 
             Frame::StreamDataBlocked { stream_id, limit } =>
-                qlog::QuicFrame::stream_data_blocked(
-                    stream_id.to_string(),
-                    limit.to_string(),
-                ),
+                qlog::QuicFrame::StreamDataBlocked {
+                    stream_id: *stream_id,
+                    limit: *limit,
+                },
 
             Frame::StreamsBlockedBidi { limit } =>
-                qlog::QuicFrame::streams_blocked(
-                    qlog::StreamType::Bidirectional,
-                    limit.to_string(),
-                ),
+                qlog::QuicFrame::StreamsBlocked {
+                    stream_type: qlog::StreamType::Bidirectional,
+                    limit: *limit,
+                },
 
             Frame::StreamsBlockedUni { limit } =>
-                qlog::QuicFrame::streams_blocked(
-                    qlog::StreamType::Unidirectional,
-                    limit.to_string(),
-                ),
+                qlog::QuicFrame::StreamsBlocked {
+                    stream_type: qlog::StreamType::Unidirectional,
+                    limit: *limit,
+                },
 
             Frame::NewConnectionId {
                 seq_num,
                 retire_prior_to,
                 conn_id,
                 ..
-            } => qlog::QuicFrame::new_connection_id(
-                seq_num.to_string(),
-                retire_prior_to.to_string(),
-                conn_id.len() as u64,
-                "TODO: https://github.com/quiclog/internet-drafts/issues/36"
-                    .to_string(),
-                "TODO: https://github.com/quiclog/internet-drafts/issues/36"
-                    .to_string(),
-            ),
+            } => qlog::QuicFrame::NewConnectionId {
+                sequence_number: *seq_num as u32,
+                retire_prior_to: *retire_prior_to as u32,
+                length: conn_id.len() as u64,
+                connection_id: "TODO: update to qlog-02 token format".to_string(),
+                reset_token: "TODO: update to qlog-02 token format".to_string(),
+            },
 
             Frame::RetireConnectionId { seq_num } =>
-                qlog::QuicFrame::retire_connection_id(seq_num.to_string()),
+                qlog::QuicFrame::RetireConnectionId {
+                    sequence_number: *seq_num as u32,
+                },
 
-            Frame::PathChallenge { .. } => qlog::QuicFrame::path_challenge(Some(
-                "TODO: https://github.com/quiclog/internet-drafts/issues/36"
-                    .to_string(),
-            )),
+            Frame::PathChallenge { .. } =>
+                qlog::QuicFrame::PathChallenge { data: None },
 
-            Frame::PathResponse { .. } => qlog::QuicFrame::path_response(Some(
-                "TODO: https://github.com/quiclog/internet-drafts/issues/36"
-                    .to_string(),
-            )),
+            Frame::PathResponse { .. } =>
+                qlog::QuicFrame::PathResponse { data: None },
 
             Frame::ConnectionClose {
                 error_code, reason, ..
-            } => qlog::QuicFrame::connection_close(
-                qlog::ErrorSpace::TransportError,
-                *error_code,
-                *error_code,
-                String::from_utf8(reason.clone()).unwrap(),
-                Some(
-                    "TODO: https://github.com/quiclog/internet-drafts/issues/36"
-                        .to_string(),
-                ),
-            ),
+            } => qlog::QuicFrame::ConnectionClose {
+                error_space: qlog::ErrorSpace::TransportError,
+                error_code: *error_code,
+                raw_error_code: None, // raw error is no different for us
+                reason: Some(String::from_utf8(reason.clone()).unwrap()),
+                trigger_frame_type: None, // don't know trigger type
+            },
 
             Frame::ApplicationClose { error_code, reason } =>
-                qlog::QuicFrame::connection_close(
-                    qlog::ErrorSpace::ApplicationError,
-                    *error_code,
-                    *error_code,
-                    String::from_utf8(reason.clone()).unwrap(),
-                    None, /* Application variant of the frame has no trigger
-                           * frame type */
-                ),
+                qlog::QuicFrame::ConnectionClose {
+                    error_space: qlog::ErrorSpace::ApplicationError,
+                    error_code: *error_code,
+                    raw_error_code: None, // raw error is no different for us
+                    reason: Some(String::from_utf8(reason.clone()).unwrap()),
+                    trigger_frame_type: None, // don't know trigger type
+                },
 
-            Frame::HandshakeDone => qlog::QuicFrame::handshake_done(),
+            Frame::HandshakeDone => qlog::QuicFrame::HandshakeDone,
 
-            Frame::Datagram { data } =>
-                qlog::QuicFrame::datagram(data.len().to_string(), None),
+            Frame::Datagram { data } => qlog::QuicFrame::Datagram {
+                length: data.len() as u64,
+                raw: None,
+            },
+
+            Frame::DatagramHeader { length } => qlog::QuicFrame::Datagram {
+                length: *length as u64,
+                raw: None,
+            },
         }
     }
 }
@@ -1065,7 +1067,11 @@ impl std::fmt::Debug for Frame {
             },
 
             Frame::Datagram { data } => {
-                write!(f, "DATAGRAM len={}", data.len(),)?;
+                write!(f, "DATAGRAM len={}", data.len())?;
+            },
+
+            Frame::DatagramHeader { length } => {
+                write!(f, "DATAGRAM len={}", length)?;
             },
         }
 
@@ -1146,6 +1152,20 @@ pub fn encode_stream_header(
 
     b.put_varint(stream_id)?;
     b.put_varint(offset)?;
+
+    // Always encode length field as 2-byte varint.
+    b.put_varint_with_len(length, 2)?;
+
+    Ok(())
+}
+
+pub fn encode_dgram_header(length: u64, b: &mut octets::OctetsMut) -> Result<()> {
+    let mut ty: u8 = 0x30;
+
+    // Always encode length
+    ty |= 0x01;
+
+    b.put_varint(u64::from(ty))?;
 
     // Always encode length field as 2-byte varint.
     b.put_varint_with_len(length, 2)?;
@@ -1881,14 +1901,14 @@ mod tests {
 
         let data = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
 
-        let mut frame = Frame::Datagram { data: data.clone() };
+        let frame = Frame::Datagram { data: data.clone() };
 
         let wire_len = {
             let mut b = octets::OctetsMut::with_slice(&mut d);
             frame.to_bytes(&mut b).unwrap()
         };
 
-        assert_eq!(wire_len, 14);
+        assert_eq!(wire_len, 15);
 
         let mut b = octets::Octets::with_slice(&mut d);
         assert_eq!(
@@ -1912,15 +1932,5 @@ mod tests {
         };
 
         assert_eq!(frame_data, data);
-
-        frame.shrink_for_retransmission();
-
-        let frame_data = match &frame {
-            Frame::Datagram { data } => data.clone(),
-
-            _ => unreachable!(),
-        };
-
-        assert_eq!(frame_data.len(), 0);
     }
 }

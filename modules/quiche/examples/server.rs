@@ -47,8 +47,7 @@ struct Client {
     partial_responses: HashMap<u64, PartialResponse>,
 }
 
-type ClientMap =
-    HashMap<quiche::ConnectionId<'static>, (net::SocketAddr, Client)>;
+type ClientMap = HashMap<quiche::ConnectionId<'static>, Client>;
 
 fn main() {
     let mut buf = [0; 65535];
@@ -91,7 +90,9 @@ fn main() {
         .unwrap();
 
     config
-        .set_application_protos(b"\x05hq-29\x05hq-28\x05hq-27\x08http/0.9")
+        .set_application_protos(
+            b"\x0ahq-interop\x05hq-29\x05hq-28\x05hq-27\x08http/0.9",
+        )
         .unwrap();
 
     config.set_max_idle_timeout(5000);
@@ -116,8 +117,7 @@ fn main() {
         // Find the shorter timeout from all the active connections.
         //
         // TODO: use event loop that properly supports timers
-        let timeout =
-            clients.values().filter_map(|(_, c)| c.conn.timeout()).min();
+        let timeout = clients.values().filter_map(|c| c.conn.timeout()).min();
 
         poll.poll(&mut events, timeout).unwrap();
 
@@ -130,12 +130,12 @@ fn main() {
             if events.is_empty() {
                 debug!("timed out");
 
-                clients.values_mut().for_each(|(_, c)| c.conn.on_timeout());
+                clients.values_mut().for_each(|c| c.conn.on_timeout());
 
                 break 'read;
             }
 
-            let (len, src) = match socket.recv_from(&mut buf) {
+            let (len, from) = match socket.recv_from(&mut buf) {
                 Ok(v) => v,
 
                 Err(e) => {
@@ -175,7 +175,7 @@ fn main() {
 
             // Lookup a connection based on the packet's connection ID. If there
             // is no connection matching, create a new one.
-            let (_, client) = if !clients.contains_key(&hdr.dcid) &&
+            let client = if !clients.contains_key(&hdr.dcid) &&
                 !clients.contains_key(&conn_id)
             {
                 if hdr.ty != quiche::Type::Initial {
@@ -192,7 +192,7 @@ fn main() {
 
                     let out = &out[..len];
 
-                    if let Err(e) = socket.send_to(out, &src) {
+                    if let Err(e) = socket.send_to(out, &from) {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             debug!("send() would block");
                             break;
@@ -215,7 +215,7 @@ fn main() {
                 if token.is_empty() {
                     warn!("Doing stateless retry");
 
-                    let new_token = mint_token(&hdr, &src);
+                    let new_token = mint_token(&hdr, &from);
 
                     let len = quiche::retry(
                         &hdr.scid,
@@ -229,7 +229,7 @@ fn main() {
 
                     let out = &out[..len];
 
-                    if let Err(e) = socket.send_to(out, &src) {
+                    if let Err(e) = socket.send_to(out, &from) {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             debug!("send() would block");
                             break;
@@ -240,7 +240,7 @@ fn main() {
                     continue 'read;
                 }
 
-                let odcid = validate_token(&src, token);
+                let odcid = validate_token(&from, token);
 
                 // The token was not valid, meaning the retry failed, so
                 // drop the packet.
@@ -261,14 +261,15 @@ fn main() {
                 debug!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
 
                 let conn =
-                    quiche::accept(&scid, odcid.as_ref(), &mut config).unwrap();
+                    quiche::accept(&scid, odcid.as_ref(), from, &mut config)
+                        .unwrap();
 
                 let client = Client {
                     conn,
                     partial_responses: HashMap::new(),
                 };
 
-                clients.insert(scid.clone(), (src, client));
+                clients.insert(scid.clone(), client);
 
                 clients.get_mut(&scid).unwrap()
             } else {
@@ -279,8 +280,10 @@ fn main() {
                 }
             };
 
+            let recv_info = quiche::RecvInfo { from };
+
             // Process potentially coalesced packets.
-            let read = match client.conn.recv(pkt_buf) {
+            let read = match client.conn.recv(pkt_buf, recv_info) {
                 Ok(v) => v,
 
                 Err(e) => {
@@ -327,9 +330,9 @@ fn main() {
         // Generate outgoing QUIC packets for all active connections and send
         // them on the UDP socket, until quiche reports that there are no more
         // packets to be sent.
-        for (peer, client) in clients.values_mut() {
+        for client in clients.values_mut() {
             loop {
-                let write = match client.conn.send(&mut out) {
+                let (write, send_info) = match client.conn.send(&mut out) {
                     Ok(v) => v,
 
                     Err(quiche::Error::Done) => {
@@ -345,8 +348,7 @@ fn main() {
                     },
                 };
 
-                // TODO: coalesce packets.
-                if let Err(e) = socket.send_to(&out[..write], &peer) {
+                if let Err(e) = socket.send_to(&out[..write], &send_info.to) {
                     if e.kind() == std::io::ErrorKind::WouldBlock {
                         debug!("send() would block");
                         break;
@@ -360,7 +362,7 @@ fn main() {
         }
 
         // Garbage collect closed connections.
-        clients.retain(|_, (_, ref mut c)| {
+        clients.retain(|_, ref mut c| {
             debug!("Collecting garbage");
 
             if c.conn.is_closed() {
@@ -429,9 +431,7 @@ fn validate_token<'a>(
         return None;
     }
 
-    let token = &token[addr.len()..];
-
-    Some(quiche::ConnectionId::from_ref(&token[..]))
+    Some(quiche::ConnectionId::from_ref(&token[addr.len()..]))
 }
 
 /// Handles incoming HTTP/0.9 requests.
@@ -499,7 +499,7 @@ fn handle_writable(client: &mut Client, stream_id: u64) {
     let resp = client.partial_responses.get_mut(&stream_id).unwrap();
     let body = &resp.body[resp.written..];
 
-    let written = match conn.stream_send(stream_id, &body, true) {
+    let written = match conn.stream_send(stream_id, body, true) {
         Ok(v) => v,
 
         Err(quiche::Error::Done) => 0,

@@ -73,6 +73,9 @@ pub enum State {
 
     /// Reading and discarding data.
     Drain,
+
+    /// All data has been read.
+    Finished,
 }
 
 impl Type {
@@ -487,6 +490,11 @@ impl Stream {
         Ok((len, fin))
     }
 
+    /// Marks the stream as finished.
+    pub fn finished(&mut self) {
+        let _ = self.state_transition(State::Finished, 0, false);
+    }
+
     /// Tries to read DATA payload from the given cursor.
     ///
     /// This is intended to replace `try_consume_data()` in tests, in order to
@@ -572,7 +580,7 @@ mod tests {
         let mut b = octets::OctetsMut::with_slice(&mut d);
 
         let frame = frame::Frame::Settings {
-            max_header_list_size: Some(0),
+            max_field_section_size: Some(0),
             qpack_max_table_capacity: Some(0),
             qpack_blocked_streams: Some(0),
             h3_datagram: None,
@@ -628,7 +636,7 @@ mod tests {
         let mut b = octets::OctetsMut::with_slice(&mut d);
 
         let frame = frame::Frame::Settings {
-            max_header_list_size: Some(0),
+            max_field_section_size: Some(0),
             qpack_max_table_capacity: Some(0),
             qpack_blocked_streams: Some(0),
             h3_datagram: None,
@@ -693,7 +701,7 @@ mod tests {
         let goaway = frame::Frame::GoAway { id: 0 };
 
         let settings = frame::Frame::Settings {
-            max_header_list_size: Some(0),
+            max_field_section_size: Some(0),
             qpack_max_table_capacity: Some(0),
             qpack_blocked_streams: Some(0),
             h3_datagram: None,
@@ -736,7 +744,7 @@ mod tests {
         let hdrs = frame::Frame::Headers { header_block };
 
         let settings = frame::Frame::Settings {
-            max_header_list_size: Some(0),
+            max_field_section_size: Some(0),
             qpack_max_table_capacity: Some(0),
             qpack_blocked_streams: Some(0),
             h3_datagram: None,

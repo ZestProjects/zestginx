@@ -27,7 +27,6 @@
 use std::ffi;
 use std::ptr;
 use std::slice;
-use std::str;
 
 use libc::c_char;
 use libc::c_int;
@@ -49,10 +48,10 @@ pub extern fn quiche_h3_config_new() -> *mut h3::Config {
 }
 
 #[no_mangle]
-pub extern fn quiche_h3_config_set_max_header_list_size(
+pub extern fn quiche_h3_config_set_max_field_section_size(
     config: &mut h3::Config, v: u64,
 ) {
-    config.set_max_header_list_size(v);
+    config.set_max_field_section_size(v);
 }
 
 #[no_mangle]
@@ -115,6 +114,8 @@ pub extern fn quiche_h3_event_type(ev: &h3::Event) -> u32 {
         h3::Event::Datagram { .. } => 3,
 
         h3::Event::GoAway { .. } => 4,
+
+        h3::Event::Reset { .. } => 5,
     }
 }
 
@@ -324,15 +325,8 @@ fn headers_from_ptr<'a>(
 
     for h in headers {
         out.push({
-            let name = unsafe {
-                let slice = slice::from_raw_parts(h.name, h.name_len);
-                str::from_utf8_unchecked(slice)
-            };
-
-            let value = unsafe {
-                let slice = slice::from_raw_parts(h.value, h.value_len);
-                str::from_utf8_unchecked(slice)
-            };
+            let name = unsafe { slice::from_raw_parts(h.name, h.name_len) };
+            let value = unsafe { slice::from_raw_parts(h.value, h.value_len) };
 
             h3::HeaderRef::new(name, value)
         });

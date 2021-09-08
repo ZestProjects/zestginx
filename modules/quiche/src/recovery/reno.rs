@@ -43,6 +43,9 @@ pub static RENO: CongestionControlOps = CongestionControlOps {
     on_packet_acked,
     congestion_event,
     collapse_cwnd,
+    checkpoint,
+    rollback,
+    has_custom_pacing,
 };
 
 pub fn on_packet_sent(r: &mut Recovery, sent_bytes: usize, _now: Instant) {
@@ -63,61 +66,34 @@ fn on_packet_acked(
     }
 
     if r.congestion_window < r.ssthresh {
-        // Slow start.
-        let cwnd_inc = cmp::min(
-            packet.size,
-            r.max_datagram_size * recovery::ABC_L -
-                cmp::min(
-                    r.bytes_acked_sl,
-                    r.max_datagram_size * recovery::ABC_L,
-                ),
-        );
-
         // In Slow slart, bytes_acked_sl is used for counting
         // acknowledged bytes.
         r.bytes_acked_sl += packet.size;
 
-        r.congestion_window += cwnd_inc;
+        if r.hystart.in_css(epoch) {
+            r.congestion_window += r.hystart.css_cwnd_inc(r.max_datagram_size);
+        } else {
+            r.congestion_window += r.max_datagram_size;
+        }
 
-        if r.hystart.enabled() &&
-            epoch == packet::EPOCH_APPLICATION &&
-            r.hystart.try_enter_lss(
-                packet,
-                r.latest_rtt,
-                r.congestion_window,
-                now,
-                r.max_datagram_size,
-            )
-        {
+        if r.hystart.on_packet_acked(
+            epoch,
+            packet,
+            r.latest_rtt,
+            r.congestion_window,
+            now,
+            r.max_datagram_size,
+        ) {
+            // Exit to congestion avoidance if CSS ends.
             r.ssthresh = r.congestion_window;
         }
     } else {
         // Congestion avoidance.
-        let mut reno_cwnd = r.congestion_window;
-
         r.bytes_acked_ca += packet.size;
 
         if r.bytes_acked_ca >= r.congestion_window {
+            r.congestion_window += r.max_datagram_size;
             r.bytes_acked_ca -= r.congestion_window;
-            reno_cwnd += r.max_datagram_size;
-        }
-
-        // When in Limited Slow Start, take the max of CA cwnd and
-        // LSS cwnd.
-        if r.hystart.in_lss(epoch) {
-            let lss_cwnd = r.hystart.lss_cwnd(
-                packet.size,
-                r.bytes_acked_sl,
-                r.congestion_window,
-                r.ssthresh,
-                r.max_datagram_size,
-            );
-
-            r.bytes_acked_sl += packet.size;
-
-            r.congestion_window = cmp::max(reno_cwnd, lss_cwnd);
-        } else {
-            r.congestion_window = reno_cwnd;
         }
     }
 }
@@ -144,7 +120,7 @@ fn congestion_event(
 
         r.ssthresh = r.congestion_window;
 
-        if r.hystart.in_lss(epoch) {
+        if r.hystart.in_css(epoch) {
             r.hystart.congestion_event();
         }
     }
@@ -154,6 +130,20 @@ pub fn collapse_cwnd(r: &mut Recovery) {
     r.congestion_window = r.max_datagram_size * recovery::MINIMUM_WINDOW_PACKETS;
     r.bytes_acked_sl = 0;
     r.bytes_acked_ca = 0;
+
+    if r.hystart.enabled() {
+        r.hystart.reset();
+    }
+}
+
+fn checkpoint(_r: &mut Recovery) {}
+
+fn rollback(_r: &mut Recovery) -> bool {
+    true
+}
+
+fn has_custom_pacing() -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -232,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn reno_slow_start_abc_l() {
+    fn reno_slow_start_multi_acks() {
         let mut cfg = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
         cfg.set_cc_algorithm(recovery::CongestionControlAlgorithm::Reno);
 
@@ -283,8 +273,8 @@ mod tests {
 
         r.on_packets_acked(acked, packet::EPOCH_APPLICATION, now);
 
-        // Acked 3 packets, but cwnd will increase 2 x mss.
-        assert_eq!(r.cwnd(), cwnd_prev + p.size * recovery::ABC_L);
+        // Acked 3 packets.
+        assert_eq!(r.cwnd(), cwnd_prev + p.size * 3);
     }
 
     #[test]
