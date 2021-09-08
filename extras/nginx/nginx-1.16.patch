@@ -1,4 +1,4 @@
-From 8159b9f5ea2f6f0fbb31f78b629009d615c428d3 Mon Sep 17 00:00:00 2001
+From c466e7a968a130199adee030873dfd60d38bc664 Mon Sep 17 00:00:00 2001
 From: Alessandro Ghedini <alessandro@cloudflare.com>
 Date: Thu, 22 Oct 2020 12:28:02 +0100
 Subject: [PATCH] Initial QUIC and HTTP/3 implementation using quiche
@@ -14,7 +14,7 @@ Subject: [PATCH] Initial QUIC and HTTP/3 implementation using quiche
  auto/options                            |    9 +
  src/core/ngx_connection.h               |    7 +
  src/core/ngx_core.h                     |    3 +
- src/event/ngx_event_quic.c              |  604 +++++++
+ src/event/ngx_event_quic.c              |  620 +++++++
  src/event/ngx_event_quic.h              |   49 +
  src/event/ngx_event_udp.c               |    8 +
  src/http/modules/ngx_http_ssl_module.c  |   13 +-
@@ -26,13 +26,13 @@ Subject: [PATCH] Initial QUIC and HTTP/3 implementation using quiche
  src/http/ngx_http_request.h             |    3 +
  src/http/ngx_http_request_body.c        |   33 +
  src/http/ngx_http_upstream.c            |   13 +
- src/http/v3/ngx_http_v3.c               | 2191 +++++++++++++++++++++++
+ src/http/v3/ngx_http_v3.c               | 2231 +++++++++++++++++++++++
  src/http/v3/ngx_http_v3.h               |   79 +
  src/http/v3/ngx_http_v3_filter_module.c |   68 +
  src/http/v3/ngx_http_v3_module.c        |  286 +++
  src/http/v3/ngx_http_v3_module.h        |   34 +
  src/os/unix/ngx_udp_sendmsg_chain.c     |    1 +
- 28 files changed, 3690 insertions(+), 11 deletions(-)
+ 28 files changed, 3746 insertions(+), 11 deletions(-)
  create mode 100644 auto/lib/quiche/conf
  create mode 100644 auto/lib/quiche/make
  create mode 100644 src/event/ngx_event_quic.c
@@ -340,10 +340,10 @@ index 93ca9174d..d0441f034 100644
  #include <ngx_module.h>
 diff --git a/src/event/ngx_event_quic.c b/src/event/ngx_event_quic.c
 new file mode 100644
-index 000000000..aa7e8e697
+index 000000000..591a809e0
 --- /dev/null
 +++ b/src/event/ngx_event_quic.c
-@@ -0,0 +1,604 @@
+@@ -0,0 +1,620 @@
 +
 +/*
 + * Copyright (C) Cloudflare, Inc.
@@ -518,7 +518,8 @@ index 000000000..aa7e8e697
 +    }
 +#endif
 +
-+    conn = quiche_conn_new_with_tls(scid, sizeof(scid), NULL, 0, quic->config,
++    conn = quiche_conn_new_with_tls(scid, sizeof(scid), NULL, 0,
++                                    c->sockaddr, c->socklen, quic->config,
 +                                    c->ssl->connection, true);
 +    if (conn == NULL) {
 +        ngx_log_error(NGX_LOG_ERR, c->log, 0, "failed to create quic connection");
@@ -548,12 +549,17 @@ index 000000000..aa7e8e697
 +    size_t    buf_len;
 +    ssize_t   done;
 +
++    quiche_recv_info recv_info = {
++        c->sockaddr,
++        c->socklen,
++    };
++
 +    /* Process the client's Initial packet, which was saved into c->buffer by
 +     * ngx_event_recvmsg(). */
 +    buf = c->buffer->pos;
 +    buf_len = ngx_buf_size(c->buffer);
 +
-+    done = quiche_conn_recv(c->quic->conn, buf, buf_len);
++    done = quiche_conn_recv(c->quic->conn, buf, buf_len, &recv_info);
 +
 +    if ((done < 0) && (done != QUICHE_ERR_DONE)) {
 +        ngx_log_debug1(NGX_LOG_DEBUG_EVENT, c->log, 0,
@@ -605,7 +611,12 @@ index 000000000..aa7e8e697
 +            return;
 +        }
 +
-+        ssize_t done = quiche_conn_recv(c->quic->conn, buf, n);
++        quiche_recv_info recv_info = {
++            c->sockaddr,
++            c->socklen,
++        };
++
++        ssize_t done = quiche_conn_recv(c->quic->conn, buf, n, &recv_info);
 +
 +        if (done == QUICHE_ERR_DONE) {
 +            break;
@@ -644,6 +655,7 @@ index 000000000..aa7e8e697
 +ngx_quic_write_handler(ngx_event_t *wev)
 +{
 +    ngx_connection_t   *c;
++    quiche_send_info    send_info;
 +    static uint8_t      out[MAX_DATAGRAM_SIZE];
 +
 +    c = wev->data;
@@ -667,7 +679,8 @@ index 000000000..aa7e8e697
 +    }
 +
 +    for (;;) {
-+        ssize_t written = quiche_conn_send(c->quic->conn, out, sizeof(out));
++        ssize_t written = quiche_conn_send(c->quic->conn, out, sizeof(out),
++                                           &send_info);
 +
 +        if (written == QUICHE_ERR_DONE) {
 +            ngx_log_debug0(NGX_LOG_DEBUG_EVENT, c->log, 0, "quic done writing");
@@ -787,8 +800,9 @@ index 000000000..aa7e8e697
 +ngx_int_t
 +ngx_quic_shutdown(ngx_connection_t *c)
 +{
-+    ssize_t         written;
-+    static uint8_t  out[MAX_DATAGRAM_SIZE];
++    ssize_t           written;
++    quiche_send_info  send_info;
++    static uint8_t    out[MAX_DATAGRAM_SIZE];
 +
 +    /* Connection is closed, free memory. */
 +    if (quiche_conn_is_closed(c->quic->conn)) {
@@ -813,7 +827,7 @@ index 000000000..aa7e8e697
 +    /* Try sending a packet in order to flush pending frames (CONNECTION_CLOSE
 +     * for example), but ignore errors as we are already closing the connection
 +     * anyway. */
-+    written = quiche_conn_send(c->quic->conn, out, sizeof(out));
++    written = quiche_conn_send(c->quic->conn, out, sizeof(out), &send_info);
 +
 +    if (written > 0) {
 +        ngx_quic_send_udp_packet(c, out, written);
@@ -935,6 +949,8 @@ index 000000000..aa7e8e697
 +
 +    out_chain.buf = &out_buf;
 +    out_chain.next = NULL;
++
++    c->write->ready = 1;
 +
 +    cl = c->send_chain(c, &out_chain, 0);
 +
@@ -1594,10 +1610,10 @@ index a7391d09a..398af2797 100644
      if (ngx_event_flags & NGX_USE_KQUEUE_EVENT) {
 diff --git a/src/http/v3/ngx_http_v3.c b/src/http/v3/ngx_http_v3.c
 new file mode 100644
-index 000000000..2e536f3ff
+index 000000000..1a05d4e01
 --- /dev/null
 +++ b/src/http/v3/ngx_http_v3.c
-@@ -0,0 +1,2191 @@
+@@ -0,0 +1,2231 @@
 +
 +/*
 + * Copyright (C) Cloudflare, Inc.
@@ -1954,6 +1970,8 @@ index 000000000..2e536f3ff
 +ngx_http_v3_handler(ngx_connection_t *c)
 +{
 +    ngx_chain_t                out;
++    ngx_connection_t          *fc;
++    ngx_http_request_t        *r;
 +    ngx_http_v3_connection_t  *h3c;
 +    ngx_http_v3_stream_t      *stream;
 +
@@ -2031,6 +2049,29 @@ index 000000000..2e536f3ff
 +                        ngx_post_event(stream->request->connection->read,
 +                                       &ngx_posted_events);
 +                    }
++
++                    stream->in_closed = 1;
++                }
++
++                break;
++            }
++
++            case QUICHE_H3_EVENT_RESET: {
++                /* Lookup stream. If there isn't one, it means it has already
++                 * been closed, so ignore the event. */
++                stream = ngx_http_v3_stream_lookup(h3c, stream_id);
++
++                if (stream != NULL && !stream->in_closed) {
++                    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, c->log, 0,
++                                   "http3 reset");
++
++                    r = stream->request;
++                    fc = r->connection;
++
++                    fc->error = 1;
++
++                    ngx_post_event(stream->request->connection->read,
++                                   &ngx_posted_events);
 +
 +                    stream->in_closed = 1;
 +                }
@@ -2854,7 +2895,12 @@ index 000000000..2e536f3ff
 +        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
 +                       "http3 request body filter");
 +
-+        rb->rest = clcf->client_body_buffer_size;
++        if (r->headers_in.chunked) {
++            rb->rest = clcf->client_body_buffer_size;
++            r->headers_in.content_length_n = 0;
++        } else {
++            rb->rest = r->headers_in.content_length_n;
++        }
 +    }
 +
 +    out = NULL;
@@ -2864,6 +2910,10 @@ index 000000000..2e536f3ff
 +
 +        if (rb->rest == 0) {
 +            break;
++        }
++
++        if (ngx_buf_size(cl->buf) == 0) {
++            continue;
 +        }
 +
 +        tl = ngx_chain_get_free_buf(r->pool, &rb->free);
@@ -3476,12 +3526,20 @@ index 000000000..2e536f3ff
 +    r = c->data;
 +    h3c = r->qstream->connection;
 +
++    if (c->error) {
++        rev->ready = 0;
++
++        return NGX_ERROR;
++    }
++
 +    n = quiche_h3_recv_body(h3c->h3, c->quic->conn, r->qstream->id, buf, size);
 +
 +    ngx_log_debug2(NGX_LOG_DEBUG_EVENT, c->log, 0,
 +                   "http3 body recv: %z of %uz", n, size);
 +
 +    if (quiche_conn_stream_finished(c->quic->conn, r->qstream->id)) {
++        rev->ready = 0;
++
 +        /* Re-schedule connection read event to poll for Finished event. */
 +        ngx_post_event(h3c->connection->read, &ngx_posted_events);
 +    }
@@ -3508,15 +3566,12 @@ index 000000000..2e536f3ff
 +        n = NGX_AGAIN;
 +
 +    } else {
-+        /* n = ngx_connection_error(c, err, "recv() failed"); */
++        rev->error = 1;
++
 +        n = NGX_ERROR;
 +    }
 +
 +    rev->ready = 0;
-+
-+    if (n == NGX_ERROR) {
-+        rev->error = 1;
-+    }
 +
 +    return n;
 +}
@@ -3732,18 +3787,17 @@ index 000000000..2e536f3ff
 +    c->read->handler = ngx_http_empty_handler;
 +    c->write->handler = ngx_http_empty_handler;
 +
++    root = h3c->streams.root;
 +    sentinel = h3c->streams.sentinel;
 +
++    if (root != sentinel) {
++        node = ngx_rbtree_min(h3c->streams.root, sentinel);
++    } else {
++        node = NULL;
++    }
++
 +    /* Close all pending streams / requests. */
-+    for ( ;; ) {
-+        root = h3c->streams.root;
-+
-+        if (root == sentinel) {
-+            break;
-+        }
-+
-+        node = ngx_rbtree_min(root, sentinel);
-+
++    while (node != NULL) {
 +        stream = (ngx_http_v3_stream_t *) node;
 +
 +        r = stream->request;
@@ -3765,6 +3819,8 @@ index 000000000..2e536f3ff
 +        } else {
 +            ev = fc->read;
 +        }
++
++        node = ngx_rbtree_next(&h3c->streams, node);
 +
 +        ev->eof = 1;
 +        ev->handler(ev);
@@ -4180,8 +4236,8 @@ index 000000000..30955c4cd
 +        return NGX_CONF_ERROR;
 +    }
 +
-+    quiche_h3_config_set_max_header_list_size(conf->http3,
-+                                              conf->max_header_size);
++    quiche_h3_config_set_max_field_section_size(conf->http3,
++                                                conf->max_header_size);
 +
 +    cln = ngx_pool_cleanup_add(cf->pool, 0);
 +    if (cln == NULL) {
@@ -4293,5 +4349,5 @@ index 5399c7916..9b03ca536 100644
                             "sendmsg() not ready");
              return NGX_AGAIN;
 -- 
-2.30.2
+2.32.0
 

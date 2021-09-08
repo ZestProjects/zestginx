@@ -39,7 +39,6 @@ use std::rc::Rc;
 
 use std::cell::RefCell;
 
-use std::net;
 use std::path;
 
 use quiche::ConnectionId;
@@ -54,8 +53,9 @@ pub fn stdout_sink(out: String) {
 ///
 /// This module contains constants and functions for working with ALPN.
 pub mod alpns {
-    pub const HTTP_09: [&str; 4] = ["hq-29", "hq-28", "hq-27", "http/0.9"];
-    pub const HTTP_3: [&str; 3] = ["h3-29", "h3-28", "h3-27"];
+    pub const HTTP_09: [&str; 5] =
+        ["hq-interop", "hq-29", "hq-28", "hq-27", "http/0.9"];
+    pub const HTTP_3: [&str; 4] = ["h3", "h3-29", "h3-28", "h3-27"];
     pub const SIDUCK: [&str; 2] = ["siduck", "siduck-00"];
 
     pub fn length_prefixed(alpns: &[&str]) -> Vec<u8> {
@@ -94,9 +94,11 @@ pub struct Client {
     pub partial_requests: std::collections::HashMap<u64, PartialRequest>,
 
     pub partial_responses: std::collections::HashMap<u64, PartialResponse>,
+
+    pub bytes_sent: usize,
 }
 
-pub type ClientMap = HashMap<ConnectionId<'static>, (net::SocketAddr, Client)>;
+pub type ClientMap = HashMap<ConnectionId<'static>, Client>;
 
 /// Makes a buffered writer for a resource with a target URL.
 ///
@@ -174,8 +176,20 @@ fn dump_json(reqs: &[Http3Request], output_sink: &mut dyn FnMut(String)) {
         let mut req_hdrs = req.hdrs.iter().peekable();
         while let Some(h) = req_hdrs.next() {
             writeln!(out, "        {{").unwrap();
-            writeln!(out, "          \"name\": \"{}\",", h.name()).unwrap();
-            writeln!(out, "          \"value\": \"{}\"", h.value()).unwrap();
+            writeln!(
+                out,
+                "          \"name\": \"{}\",",
+                std::str::from_utf8(h.name()).unwrap()
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "          \"value\": \"{}\"",
+                std::str::from_utf8(h.value())
+                    .unwrap()
+                    .replace("\"", "\\\"")
+            )
+            .unwrap();
 
             if req_hdrs.peek().is_some() {
                 writeln!(out, "        }},").unwrap();
@@ -191,11 +205,18 @@ fn dump_json(reqs: &[Http3Request], output_sink: &mut dyn FnMut(String)) {
         let mut response_hdrs = req.response_hdrs.iter().peekable();
         while let Some(h) = response_hdrs.next() {
             writeln!(out, "        {{").unwrap();
-            writeln!(out, "          \"name\": \"{}\",", h.name()).unwrap();
+            writeln!(
+                out,
+                "          \"name\": \"{}\",",
+                std::str::from_utf8(h.name()).unwrap()
+            )
+            .unwrap();
             writeln!(
                 out,
                 "          \"value\": \"{}\"",
-                h.value().replace("\"", "\\\"")
+                std::str::from_utf8(h.value())
+                    .unwrap()
+                    .replace("\"", "\\\"")
             )
             .unwrap();
 
@@ -720,7 +741,7 @@ impl HttpConn for Http09Conn {
         let resp = partial_responses.get_mut(&stream_id).unwrap();
         let body = &resp.body[resp.written..];
 
-        let written = match conn.stream_send(stream_id, &body, true) {
+        let written = match conn.stream_send(stream_id, body, true) {
             Ok(v) => v,
 
             Err(quiche::Error::Done) => 0,
@@ -790,34 +811,35 @@ impl Http3Conn {
                 };
 
                 let mut hdrs = vec![
-                    quiche::h3::Header::new(":method", &method),
-                    quiche::h3::Header::new(":scheme", url.scheme()),
-                    quiche::h3::Header::new(":authority", &authority),
+                    quiche::h3::Header::new(b":method", method.as_bytes()),
+                    quiche::h3::Header::new(b":scheme", url.scheme().as_bytes()),
+                    quiche::h3::Header::new(b":authority", authority.as_bytes()),
                     quiche::h3::Header::new(
-                        ":path",
-                        &url[url::Position::BeforePath..],
+                        b":path",
+                        url[url::Position::BeforePath..].as_bytes(),
                     ),
-                    quiche::h3::Header::new("user-agent", "quiche"),
+                    quiche::h3::Header::new(b"user-agent", b"quiche"),
                 ];
 
                 // Add custom headers to the request.
                 for header in req_headers {
                     let header_split: Vec<&str> =
                         header.splitn(2, ": ").collect();
+
                     if header_split.len() != 2 {
                         panic!("malformed header provided - \"{}\"", header);
                     }
 
                     hdrs.push(quiche::h3::Header::new(
-                        header_split[0],
-                        header_split[1],
+                        header_split[0].as_bytes(),
+                        header_split[1].as_bytes(),
                     ));
                 }
 
                 if body.is_some() {
                     hdrs.push(quiche::h3::Header::new(
-                        "content-length",
-                        &body.as_ref().unwrap().len().to_string(),
+                        b"content-length",
+                        body.as_ref().unwrap().len().to_string().as_bytes(),
                     ));
                 }
 
@@ -892,25 +914,17 @@ impl Http3Conn {
         // Parse some of the request headers.
         for hdr in request {
             match hdr.name() {
-                ":scheme" => {
-                    scheme = hdr.value();
-                },
+                b":scheme" => scheme = std::str::from_utf8(hdr.value()).unwrap(),
 
-                ":authority" | "host" => {
-                    host = hdr.value();
-                },
+                b":authority" | b"host" =>
+                    host = std::str::from_utf8(hdr.value()).unwrap(),
 
-                ":path" => {
-                    path = hdr.value();
-                },
+                b":path" => path = std::str::from_utf8(hdr.value()).unwrap(),
 
-                ":method" => {
-                    method = hdr.value();
-                },
+                b":method" => method = std::str::from_utf8(hdr.value()).unwrap(),
 
-                "priority" => {
-                    priority = hdr.value();
-                },
+                b"priority" =>
+                    priority = std::str::from_utf8(hdr.value()).unwrap(),
 
                 _ => (),
             }
@@ -918,8 +932,8 @@ impl Http3Conn {
 
         if scheme != "http" && scheme != "https" {
             let headers = vec![
-                quiche::h3::Header::new(":status", &"400".to_string()),
-                quiche::h3::Header::new("server", "quiche"),
+                quiche::h3::Header::new(b":status", "400".to_string().as_bytes()),
+                quiche::h3::Header::new(b"server", b"quiche"),
             ];
 
             return (headers, b"Invalid scheme".to_vec(), priority.to_string());
@@ -967,13 +981,17 @@ impl Http3Conn {
         };
 
         let mut headers = vec![
-            quiche::h3::Header::new(":status", &status.to_string()),
-            quiche::h3::Header::new("server", "quiche"),
-            quiche::h3::Header::new("content-length", &body.len().to_string()),
+            quiche::h3::Header::new(b":status", status.to_string().as_bytes()),
+            quiche::h3::Header::new(b"server", b"quiche"),
+            quiche::h3::Header::new(
+                b"content-length",
+                body.len().to_string().as_bytes(),
+            ),
         ];
 
         if !priority.is_empty() {
-            headers.push(quiche::h3::Header::new("priority", &priority));
+            headers
+                .push(quiche::h3::Header::new(b"priority", priority.as_bytes()));
         }
 
         (headers, body, priority.to_string())
@@ -1178,6 +1196,19 @@ impl HttpConn for Http3Conn {
                     }
                 },
 
+                Ok((_stream_id, quiche::h3::Event::Reset(e))) => {
+                    error!("request was reset by peer with {}, closing...", e);
+
+                    match conn.close(true, 0x00, b"kthxbye") {
+                        // Already closed.
+                        Ok(_) | Err(quiche::Error::Done) => (),
+
+                        Err(e) => panic!("error closing conn: {:?}", e),
+                    }
+
+                    break;
+                },
+
                 Ok((_flow_id, quiche::h3::Event::Datagram)) => {
                     while let Ok((len, flow_id, flow_id_len)) =
                         self.h3_conn.recv_dgram(conn, buf)
@@ -1328,6 +1359,8 @@ impl HttpConn for Http3Conn {
 
                 Ok((_stream_id, quiche::h3::Event::Finished)) => (),
 
+                Ok((_stream_id, quiche::h3::Event::Reset { .. })) => (),
+
                 Ok((_, quiche::h3::Event::Datagram)) => {
                     while let Ok((len, flow_id, flow_id_len)) =
                         self.h3_conn.recv_dgram(conn, buf)
@@ -1408,7 +1441,7 @@ impl HttpConn for Http3Conn {
         let resp = partial_responses.get_mut(&stream_id).unwrap();
 
         if let Some(ref headers) = resp.headers {
-            match self.h3_conn.send_response(conn, stream_id, &headers, false) {
+            match self.h3_conn.send_response(conn, stream_id, headers, false) {
                 Ok(_) => (),
 
                 Err(quiche::h3::Error::StreamBlocked) => {

@@ -38,6 +38,7 @@ pub struct CommonArgs {
     pub max_streams_bidi: u64,
     pub max_streams_uni: u64,
     pub idle_timeout: u64,
+    pub early_data: bool,
     pub dump_packet_path: Option<String>,
     pub no_grease: bool,
     pub cc_algorithm: String,
@@ -99,24 +100,26 @@ impl Args for CommonArgs {
         };
 
         let dgram_count = args.get_str("--dgram-count");
-        let dgram_count = u64::from_str_radix(dgram_count, 10).unwrap();
+        let dgram_count = dgram_count.parse::<u64>().unwrap();
 
         let dgram_data = args.get_str("--dgram-data").to_string();
 
         let max_data = args.get_str("--max-data");
-        let max_data = u64::from_str_radix(max_data, 10).unwrap();
+        let max_data = max_data.parse::<u64>().unwrap();
 
         let max_stream_data = args.get_str("--max-stream-data");
-        let max_stream_data = u64::from_str_radix(max_stream_data, 10).unwrap();
+        let max_stream_data = max_stream_data.parse::<u64>().unwrap();
 
         let max_streams_bidi = args.get_str("--max-streams-bidi");
-        let max_streams_bidi = u64::from_str_radix(max_streams_bidi, 10).unwrap();
+        let max_streams_bidi = max_streams_bidi.parse::<u64>().unwrap();
 
         let max_streams_uni = args.get_str("--max-streams-uni");
-        let max_streams_uni = u64::from_str_radix(max_streams_uni, 10).unwrap();
+        let max_streams_uni = max_streams_uni.parse::<u64>().unwrap();
 
         let idle_timeout = args.get_str("--idle-timeout");
-        let idle_timeout = u64::from_str_radix(idle_timeout, 10).unwrap();
+        let idle_timeout = idle_timeout.parse::<u64>().unwrap();
+
+        let early_data = args.get_bool("--early-data");
 
         let dump_packet_path = if args.get_str("--dump-packets") != "" {
             Some(args.get_str("--dump-packets").to_string())
@@ -137,6 +140,7 @@ impl Args for CommonArgs {
             max_streams_bidi,
             max_streams_uni,
             idle_timeout,
+            early_data,
             dump_packet_path,
             no_grease,
             cc_algorithm: cc_algorithm.to_string(),
@@ -157,6 +161,7 @@ impl Default for CommonArgs {
             max_streams_bidi: 100,
             max_streams_uni: 100,
             idle_timeout: 30000,
+            early_data: false,
             dump_packet_path: None,
             no_grease: false,
             cc_algorithm: "cubic".to_string(),
@@ -182,6 +187,7 @@ Options:
   --idle-timeout TIMEOUT   Idle timeout in milliseconds [default: 30000].
   --wire-version VERSION   The version number to send to the server [default: babababa].
   --http-version VERSION   HTTP version to use [default: all].
+  --early-data             Enable sending early data.
   --dgram-proto PROTO      DATAGRAM application protocol to use [default: none].
   --dgram-count COUNT      Number of DATAGRAMs to send [default: 0].
   --dgram-data DATA        Data to send for certain types of DATAGRAM application protocol [default: quack].
@@ -196,6 +202,7 @@ Options:
   --disable-hystart        Disable HyStart++.
   -H --header HEADER ...   Add a request header.
   -n --requests REQUESTS   Send the given number of identical requests [default: 1].
+  --session-file PATH      File used to cache a TLS session for resumption.
   -h --help                Show this screen.
 ";
 
@@ -211,6 +218,7 @@ pub struct ClientArgs {
     pub body: Option<Vec<u8>>,
     pub method: String,
     pub connect_to: Option<String>,
+    pub session_file: Option<String>,
 }
 
 impl Args for ClientArgs {
@@ -229,7 +237,7 @@ impl Args for ClientArgs {
         let dump_json = args.get_bool("--dump-json");
         let dump_json = if dump_json {
             let max_payload = args.get_str("--max-json-payload");
-            let max_payload = usize::from_str_radix(max_payload, 10).unwrap();
+            let max_payload = max_payload.parse::<usize>().unwrap();
             Some(max_payload)
         } else {
             None
@@ -250,7 +258,7 @@ impl Args for ClientArgs {
             .collect();
 
         let reqs_cardinal = args.get_str("--requests");
-        let reqs_cardinal = u64::from_str_radix(reqs_cardinal, 10).unwrap();
+        let reqs_cardinal = reqs_cardinal.parse::<u64>().unwrap();
 
         let no_verify = args.get_bool("--no-verify");
 
@@ -268,17 +276,24 @@ impl Args for ClientArgs {
             None
         };
 
+        let session_file = if args.get_bool("--session-file") {
+            Some(args.get_str("--session-file").to_string())
+        } else {
+            None
+        };
+
         ClientArgs {
             version,
             dump_response_path,
             dump_json,
             urls,
-            req_headers,
             reqs_cardinal,
+            req_headers,
             no_verify,
             body,
             method,
             connect_to,
+            session_file,
         }
     }
 }
@@ -296,6 +311,7 @@ impl Default for ClientArgs {
             body: None,
             method: "GET".to_string(),
             connect_to: None,
+            session_file: None,
         }
     }
 }
@@ -317,7 +333,7 @@ Options:
   --max-streams-uni STREAMS   Number of allowed concurrent streams [default: 100].
   --idle-timeout TIMEOUT   Idle timeout in milliseconds [default: 30000].
   --dump-packets PATH         Dump the incoming packets as files in the given directory.
-  --early-data                Enables receiving early data.
+  --early-data                Enable receiving early data.
   --no-retry                  Disable stateless retry.
   --no-grease                 Don't send GREASE.
   --http-version VERSION      HTTP version to use [default: all].
@@ -337,7 +353,6 @@ pub struct ServerArgs {
     pub index: String,
     pub cert: String,
     pub key: String,
-    pub early_data: bool,
 }
 
 impl Args for ServerArgs {
@@ -346,7 +361,6 @@ impl Args for ServerArgs {
 
         let listen = args.get_str("--listen").to_string();
         let no_retry = args.get_bool("--no-retry");
-        let early_data = args.get_bool("--early-data");
         let root = args.get_str("--root").to_string();
         let index = args.get_str("--index").to_string();
         let cert = args.get_str("--cert").to_string();
@@ -359,7 +373,6 @@ impl Args for ServerArgs {
             index,
             cert,
             key,
-            early_data,
         }
     }
 }

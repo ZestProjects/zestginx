@@ -24,8 +24,13 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+use std::mem::MaybeUninit;
+
 use ring::aead;
 use ring::hkdf;
+
+use libc::c_int;
+use libc::c_void;
 
 use crate::Error;
 use crate::Result;
@@ -68,11 +73,13 @@ pub enum Algorithm {
 }
 
 impl Algorithm {
-    fn get_ring_aead(self) -> &'static aead::Algorithm {
+    fn get_evp_aead(self) -> *const EVP_AEAD {
         match self {
-            Algorithm::AES128_GCM => &aead::AES_128_GCM,
-            Algorithm::AES256_GCM => &aead::AES_256_GCM,
-            Algorithm::ChaCha20_Poly1305 => &aead::CHACHA20_POLY1305,
+            Algorithm::AES128_GCM => unsafe { EVP_aead_aes_128_gcm() },
+            Algorithm::AES256_GCM => unsafe { EVP_aead_aes_256_gcm() },
+            Algorithm::ChaCha20_Poly1305 => unsafe {
+                EVP_aead_chacha20_poly1305()
+            },
         }
     }
 
@@ -93,7 +100,11 @@ impl Algorithm {
     }
 
     pub fn key_len(self) -> usize {
-        self.get_ring_aead().key_len()
+        match self {
+            Algorithm::AES128_GCM => 16,
+            Algorithm::AES256_GCM => 32,
+            Algorithm::ChaCha20_Poly1305 => 32,
+        }
     }
 
     pub fn tag_len(self) -> usize {
@@ -101,20 +112,28 @@ impl Algorithm {
             return 0;
         }
 
-        self.get_ring_aead().tag_len()
+        match self {
+            Algorithm::AES128_GCM => 16,
+            Algorithm::AES256_GCM => 16,
+            Algorithm::ChaCha20_Poly1305 => 16,
+        }
     }
 
     pub fn nonce_len(self) -> usize {
-        self.get_ring_aead().nonce_len()
+        match self {
+            Algorithm::AES128_GCM => 12,
+            Algorithm::AES256_GCM => 12,
+            Algorithm::ChaCha20_Poly1305 => 12,
+        }
     }
 }
 
 pub struct Open {
     alg: Algorithm,
 
-    hp_key: aead::quic::HeaderProtectionKey,
+    ctx: EVP_AEAD_CTX,
 
-    key: aead::LessSafeKey,
+    hp_key: aead::quic::HeaderProtectionKey,
 
     nonce: Vec<u8>,
 }
@@ -124,20 +143,17 @@ impl Open {
         alg: Algorithm, key: &[u8], iv: &[u8], hp_key: &[u8],
     ) -> Result<Open> {
         Ok(Open {
+            alg,
+
+            ctx: make_aead_ctx(alg, key)?,
+
             hp_key: aead::quic::HeaderProtectionKey::new(
                 alg.get_ring_hp(),
                 hp_key,
             )
             .map_err(|_| Error::CryptoFail)?,
 
-            key: aead::LessSafeKey::new(
-                aead::UnboundKey::new(alg.get_ring_aead(), key)
-                    .map_err(|_| Error::CryptoFail)?,
-            ),
-
             nonce: Vec::from(iv),
-
-            alg,
         })
     }
 
@@ -149,9 +165,9 @@ impl Open {
         let mut iv = vec![0; nonce_len];
         let mut pn_key = vec![0; key_len];
 
-        derive_pkt_key(aead, &secret, &mut key)?;
-        derive_pkt_iv(aead, &secret, &mut iv)?;
-        derive_hdr_key(aead, &secret, &mut pn_key)?;
+        derive_pkt_key(aead, secret, &mut key)?;
+        derive_pkt_iv(aead, secret, &mut iv)?;
+        derive_hdr_key(aead, secret, &mut pn_key)?;
 
         Open::new(aead, &key, &iv, &pn_key)
     }
@@ -163,16 +179,34 @@ impl Open {
             return Ok(buf.len());
         }
 
+        let tag_len = self.alg().tag_len();
+
+        let mut out_len = buf.len() - tag_len;
+
+        let max_out_len = out_len;
+
         let nonce = make_nonce(&self.nonce, counter);
 
-        let ad = aead::Aad::from(ad);
+        let rc = unsafe {
+            EVP_AEAD_CTX_open(
+                &self.ctx,          // ctx
+                buf.as_mut_ptr(),   // out
+                &mut out_len,       // out_len
+                max_out_len,        // max_out_len
+                nonce[..].as_ptr(), // nonce
+                nonce.len(),        // nonce_len
+                buf.as_ptr(),       // inp
+                buf.len(),          // in_len
+                ad.as_ptr(),        // ad
+                ad.len(),           // ad_len
+            )
+        };
 
-        let plain = self
-            .key
-            .open_in_place(nonce, ad, buf)
-            .map_err(|_| Error::CryptoFail)?;
+        if rc != 1 {
+            return Err(Error::CryptoFail);
+        }
 
-        Ok(plain.len())
+        Ok(out_len)
     }
 
     pub fn new_mask(&self, sample: &[u8]) -> Result<[u8; 5]> {
@@ -196,9 +230,9 @@ impl Open {
 pub struct Seal {
     alg: Algorithm,
 
-    hp_key: aead::quic::HeaderProtectionKey,
+    ctx: EVP_AEAD_CTX,
 
-    key: aead::LessSafeKey,
+    hp_key: aead::quic::HeaderProtectionKey,
 
     nonce: Vec<u8>,
 }
@@ -208,20 +242,17 @@ impl Seal {
         alg: Algorithm, key: &[u8], iv: &[u8], hp_key: &[u8],
     ) -> Result<Seal> {
         Ok(Seal {
+            alg,
+
+            ctx: make_aead_ctx(alg, key)?,
+
             hp_key: aead::quic::HeaderProtectionKey::new(
                 alg.get_ring_hp(),
                 hp_key,
             )
             .map_err(|_| Error::CryptoFail)?,
 
-            key: aead::LessSafeKey::new(
-                aead::UnboundKey::new(alg.get_ring_aead(), key)
-                    .map_err(|_| Error::CryptoFail)?,
-            ),
-
             nonce: Vec::from(iv),
-
-            alg,
         })
     }
 
@@ -233,40 +264,66 @@ impl Seal {
         let mut iv = vec![0; nonce_len];
         let mut pn_key = vec![0; key_len];
 
-        derive_pkt_key(aead, &secret, &mut key)?;
-        derive_pkt_iv(aead, &secret, &mut iv)?;
-        derive_hdr_key(aead, &secret, &mut pn_key)?;
+        derive_pkt_key(aead, secret, &mut key)?;
+        derive_pkt_iv(aead, secret, &mut iv)?;
+        derive_hdr_key(aead, secret, &mut pn_key)?;
 
         Seal::new(aead, &key, &iv, &pn_key)
     }
 
     pub fn seal_with_u64_counter(
-        &self, counter: u64, ad: &[u8], buf: &mut [u8],
-    ) -> Result<()> {
+        &self, counter: u64, ad: &[u8], buf: &mut [u8], in_len: usize,
+        extra_in: Option<&[u8]>,
+    ) -> Result<usize> {
         if cfg!(feature = "fuzzing") {
-            return Ok(());
+            if let Some(extra) = extra_in {
+                buf[in_len..in_len + extra.len()].copy_from_slice(extra);
+                return Ok(in_len + extra.len());
+            }
+
+            return Ok(in_len);
+        }
+
+        let tag_len = self.alg().tag_len();
+
+        let mut out_tag_len = tag_len;
+
+        let (extra_in_ptr, extra_in_len) = match extra_in {
+            Some(v) => (v.as_ptr(), v.len()),
+
+            None => (std::ptr::null(), 0),
+        };
+
+        // Make sure all the outputs combined fit in the buffer.
+        if in_len + tag_len + extra_in_len > buf.len() {
+            return Err(Error::CryptoFail);
         }
 
         let nonce = make_nonce(&self.nonce, counter);
 
-        let ad = aead::Aad::from(ad);
+        let rc = unsafe {
+            EVP_AEAD_CTX_seal_scatter(
+                &self.ctx,                  // ctx
+                buf.as_mut_ptr(),           // out
+                buf[in_len..].as_mut_ptr(), // out_tag
+                &mut out_tag_len,           // out_tag_len
+                tag_len + extra_in_len,     // max_out_tag_len
+                nonce[..].as_ptr(),         // nonce
+                nonce.len(),                // nonce_len
+                buf.as_ptr(),               // inp
+                in_len,                     // in_len
+                extra_in_ptr,               // extra_in
+                extra_in_len,               // extra_in_len
+                ad.as_ptr(),                // ad
+                ad.len(),                   // ad_len
+            )
+        };
 
-        let tag_len = self.alg().tag_len();
+        if rc != 1 {
+            return Err(Error::CryptoFail);
+        }
 
-        let in_out_len =
-            buf.len().checked_sub(tag_len).ok_or(Error::CryptoFail)?;
-
-        let (in_out, tag_out) = buf.split_at_mut(in_out_len);
-
-        let tag = self
-            .key
-            .seal_in_place_separate_tag(nonce, ad, in_out)
-            .map_err(|_| Error::CryptoFail)?;
-
-        // Append the AEAD tag to the end of the sealed buffer.
-        tag_out.copy_from_slice(tag.as_ref());
-
-        Ok(())
+        Ok(in_len + out_tag_len)
     }
 
     pub fn new_mask(&self, sample: &[u8]) -> Result<[u8; 5]> {
@@ -297,7 +354,7 @@ pub fn derive_initial_key_material(
     let key_len = aead.key_len();
     let nonce_len = aead.nonce_len();
 
-    let initial_secret = derive_initial_secret(&cid, version);
+    let initial_secret = derive_initial_secret(cid, version);
 
     // Client.
     let mut client_key = vec![0; key_len];
@@ -336,18 +393,25 @@ pub fn derive_initial_key_material(
 
 fn derive_initial_secret(secret: &[u8], version: u32) -> hkdf::Prk {
     const INITIAL_SALT: [u8; 20] = [
+        0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17, 0x9a, 0xe6,
+        0xa4, 0xc8, 0x0c, 0xad, 0xcc, 0xbb, 0x7f, 0x0a,
+    ];
+
+    const INITIAL_SALT_DRAFT29: [u8; 20] = [
         0xaf, 0xbf, 0xec, 0x28, 0x99, 0x93, 0xd2, 0x4c, 0x9e, 0x97, 0x86, 0xf1,
         0x9c, 0x61, 0x11, 0xe0, 0x43, 0x90, 0xa8, 0x99,
     ];
 
-    const INITIAL_SALT_OLD: [u8; 20] = [
+    const INITIAL_SALT_DRAFT27: [u8; 20] = [
         0xc3, 0xee, 0xf7, 0x12, 0xc7, 0x2e, 0xbb, 0x5a, 0x11, 0xa7, 0xd2, 0x43,
         0x2b, 0xb4, 0x63, 0x65, 0xbe, 0xf9, 0xf5, 0x02,
     ];
 
     let salt = match version {
         crate::PROTOCOL_VERSION_DRAFT27 | crate::PROTOCOL_VERSION_DRAFT28 =>
-            &INITIAL_SALT_OLD,
+            &INITIAL_SALT_DRAFT27,
+
+        crate::PROTOCOL_VERSION_DRAFT29 => &INITIAL_SALT_DRAFT29,
 
         _ => &INITIAL_SALT,
     };
@@ -411,6 +475,31 @@ pub fn derive_pkt_iv(
     hkdf_expand_label(&secret, LABEL, &mut out[..nonce_len])
 }
 
+fn make_aead_ctx(alg: Algorithm, key: &[u8]) -> Result<EVP_AEAD_CTX> {
+    let mut ctx = MaybeUninit::uninit();
+
+    let ctx = unsafe {
+        let aead = alg.get_evp_aead();
+
+        let rc = EVP_AEAD_CTX_init(
+            ctx.as_mut_ptr(),
+            aead,
+            key.as_ptr(),
+            alg.key_len(),
+            alg.tag_len(),
+            std::ptr::null_mut(),
+        );
+
+        if rc != 1 {
+            return Err(Error::CryptoFail);
+        }
+
+        ctx.assume_init()
+    };
+
+    Ok(ctx)
+}
+
 fn hkdf_expand_label(
     prk: &hkdf::Prk, label: &[u8], out: &mut [u8],
 ) -> Result<()> {
@@ -429,9 +518,9 @@ fn hkdf_expand_label(
     Ok(())
 }
 
-fn make_nonce(iv: &[u8], counter: u64) -> aead::Nonce {
+fn make_nonce(iv: &[u8], counter: u64) -> [u8; aead::NONCE_LEN] {
     let mut nonce = [0; aead::NONCE_LEN];
-    nonce.copy_from_slice(&iv);
+    nonce.copy_from_slice(iv);
 
     // XOR the last bytes of the IV with the counter. This is equivalent to
     // left-padding the counter with zero bytes.
@@ -439,7 +528,7 @@ fn make_nonce(iv: &[u8], counter: u64) -> aead::Nonce {
         *a ^= b;
     }
 
-    aead::Nonce::assume_unique_for_key(nonce)
+    nonce
 }
 
 // The ring HKDF expand() API does not accept an arbitrary output length, so we
@@ -453,12 +542,55 @@ impl hkdf::KeyType for ArbitraryOutputLen {
     }
 }
 
+#[allow(non_camel_case_types)]
+#[repr(transparent)]
+struct EVP_AEAD(c_void);
+
+// NOTE: This structure is copied from <openssl/aead.h> in order to be able to
+// statically allocate it. While it is not often modified upstream, it needs to
+// be kept in sync.
+#[repr(C)]
+struct EVP_AEAD_CTX {
+    aead: libc::uintptr_t,
+    opaque: [u8; 580],
+    alignment: u64,
+    tag_len: u8,
+}
+
+extern {
+    // EVP_AEAD
+    fn EVP_aead_aes_128_gcm() -> *const EVP_AEAD;
+
+    fn EVP_aead_aes_256_gcm() -> *const EVP_AEAD;
+
+    fn EVP_aead_chacha20_poly1305() -> *const EVP_AEAD;
+
+    // EVP_AEAD_CTX
+    fn EVP_AEAD_CTX_init(
+        ctx: *mut EVP_AEAD_CTX, aead: *const EVP_AEAD, key: *const u8,
+        key_len: usize, tag_len: usize, engine: *mut c_void,
+    ) -> c_int;
+
+    fn EVP_AEAD_CTX_open(
+        ctx: *const EVP_AEAD_CTX, out: *mut u8, out_len: *mut usize,
+        max_out_len: usize, nonce: *const u8, nonce_len: usize, inp: *const u8,
+        in_len: usize, ad: *const u8, ad_len: usize,
+    ) -> c_int;
+
+    fn EVP_AEAD_CTX_seal_scatter(
+        ctx: *const EVP_AEAD_CTX, out: *mut u8, out_tag: *mut u8,
+        out_tag_len: *mut usize, max_out_tag_len: usize, nonce: *const u8,
+        nonce_len: usize, inp: *const u8, in_len: usize, extra_in: *const u8,
+        extra_in_len: usize, ad: *const u8, ad_len: usize,
+    ) -> c_int;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn derive_initial_secrets() {
+    fn derive_initial_secrets_v1() {
         let dcid = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
 
         let mut secret = [0; 32];
@@ -469,7 +601,86 @@ mod tests {
         let aead = Algorithm::AES128_GCM;
 
         let initial_secret =
-            derive_initial_secret(&dcid, crate::PROTOCOL_VERSION);
+            derive_initial_secret(&dcid, crate::PROTOCOL_VERSION_V1);
+
+        // Client.
+        assert!(
+            derive_client_initial_secret(&initial_secret, &mut secret).is_ok()
+        );
+        let expected_client_initial_secret = [
+            0xc0, 0x0c, 0xf1, 0x51, 0xca, 0x5b, 0xe0, 0x75, 0xed, 0x0e, 0xbf,
+            0xb5, 0xc8, 0x03, 0x23, 0xc4, 0x2d, 0x6b, 0x7d, 0xb6, 0x78, 0x81,
+            0x28, 0x9a, 0xf4, 0x00, 0x8f, 0x1f, 0x6c, 0x35, 0x7a, 0xea,
+        ];
+        assert_eq!(&secret, &expected_client_initial_secret);
+
+        assert!(derive_pkt_key(aead, &secret, &mut pkt_key).is_ok());
+        let expected_client_pkt_key = [
+            0x1f, 0x36, 0x96, 0x13, 0xdd, 0x76, 0xd5, 0x46, 0x77, 0x30, 0xef,
+            0xcb, 0xe3, 0xb1, 0xa2, 0x2d,
+        ];
+        assert_eq!(&pkt_key, &expected_client_pkt_key);
+
+        assert!(derive_pkt_iv(aead, &secret, &mut pkt_iv).is_ok());
+        let expected_client_pkt_iv = [
+            0xfa, 0x04, 0x4b, 0x2f, 0x42, 0xa3, 0xfd, 0x3b, 0x46, 0xfb, 0x25,
+            0x5c,
+        ];
+        assert_eq!(&pkt_iv, &expected_client_pkt_iv);
+
+        assert!(derive_hdr_key(aead, &secret, &mut hdr_key).is_ok());
+        let expected_client_hdr_key = [
+            0x9f, 0x50, 0x44, 0x9e, 0x04, 0xa0, 0xe8, 0x10, 0x28, 0x3a, 0x1e,
+            0x99, 0x33, 0xad, 0xed, 0xd2,
+        ];
+        assert_eq!(&hdr_key, &expected_client_hdr_key);
+
+        // Server.
+        assert!(
+            derive_server_initial_secret(&initial_secret, &mut secret).is_ok()
+        );
+        let expected_server_initial_secret = [
+            0x3c, 0x19, 0x98, 0x28, 0xfd, 0x13, 0x9e, 0xfd, 0x21, 0x6c, 0x15,
+            0x5a, 0xd8, 0x44, 0xcc, 0x81, 0xfb, 0x82, 0xfa, 0x8d, 0x74, 0x46,
+            0xfa, 0x7d, 0x78, 0xbe, 0x80, 0x3a, 0xcd, 0xda, 0x95, 0x1b,
+        ];
+        assert_eq!(&secret, &expected_server_initial_secret);
+
+        assert!(derive_pkt_key(aead, &secret, &mut pkt_key).is_ok());
+        let expected_server_pkt_key = [
+            0xcf, 0x3a, 0x53, 0x31, 0x65, 0x3c, 0x36, 0x4c, 0x88, 0xf0, 0xf3,
+            0x79, 0xb6, 0x06, 0x7e, 0x37,
+        ];
+        assert_eq!(&pkt_key, &expected_server_pkt_key);
+
+        assert!(derive_pkt_iv(aead, &secret, &mut pkt_iv).is_ok());
+        let expected_server_pkt_iv = [
+            0x0a, 0xc1, 0x49, 0x3c, 0xa1, 0x90, 0x58, 0x53, 0xb0, 0xbb, 0xa0,
+            0x3e,
+        ];
+        assert_eq!(&pkt_iv, &expected_server_pkt_iv);
+
+        assert!(derive_hdr_key(aead, &secret, &mut hdr_key).is_ok());
+        let expected_server_hdr_key = [
+            0xc2, 0x06, 0xb8, 0xd9, 0xb9, 0xf0, 0xf3, 0x76, 0x44, 0x43, 0x0b,
+            0x49, 0x0e, 0xea, 0xa3, 0x14,
+        ];
+        assert_eq!(&hdr_key, &expected_server_hdr_key);
+    }
+
+    #[test]
+    fn derive_initial_secrets_draft29() {
+        let dcid = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
+
+        let mut secret = [0; 32];
+        let mut pkt_key = [0; 16];
+        let mut pkt_iv = [0; 12];
+        let mut hdr_key = [0; 16];
+
+        let aead = Algorithm::AES128_GCM;
+
+        let initial_secret =
+            derive_initial_secret(&dcid, crate::PROTOCOL_VERSION_DRAFT29);
 
         // Client.
         assert!(
@@ -537,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    fn derive_initial_secrets_old() {
+    fn derive_initial_secrets_draft27() {
         let dcid = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
 
         let mut secret = [0; 32];
@@ -548,7 +759,7 @@ mod tests {
         let aead = Algorithm::AES128_GCM;
 
         let initial_secret =
-            derive_initial_secret(&dcid, crate::PROTOCOL_VERSION_DRAFT28);
+            derive_initial_secret(&dcid, crate::PROTOCOL_VERSION_DRAFT27);
 
         // Client.
         assert!(

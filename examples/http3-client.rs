@@ -67,7 +67,6 @@ fn main() {
     // Create the UDP socket backing the QUIC connection, and register it with
     // the event loop.
     let socket = std::net::UdpSocket::bind(bind_addr).unwrap();
-    socket.connect(peer_addr).unwrap();
 
     let socket = mio::net::UdpSocket::from_socket(socket).unwrap();
     poll.register(
@@ -108,7 +107,8 @@ fn main() {
     let scid = quiche::ConnectionId::from_ref(&scid);
 
     // Create a QUIC connection and initiate handshake.
-    let mut conn = quiche::connect(url.domain(), &scid, &mut config).unwrap();
+    let mut conn =
+        quiche::connect(url.domain(), &scid, peer_addr, &mut config).unwrap();
 
     info!(
         "connecting to {:} from {:} with scid {}",
@@ -117,9 +117,9 @@ fn main() {
         hex_dump(&scid)
     );
 
-    let write = conn.send(&mut out).expect("initial send failed");
+    let (write, send_info) = conn.send(&mut out).expect("initial send failed");
 
-    while let Err(e) = socket.send(&out[..write]) {
+    while let Err(e) = socket.send_to(&out[..write], &send_info.to) {
         if e.kind() == std::io::ErrorKind::WouldBlock {
             debug!("send() would block");
             continue;
@@ -141,11 +141,14 @@ fn main() {
     }
 
     let req = vec![
-        quiche::h3::Header::new(":method", "GET"),
-        quiche::h3::Header::new(":scheme", url.scheme()),
-        quiche::h3::Header::new(":authority", url.host_str().unwrap()),
-        quiche::h3::Header::new(":path", &path),
-        quiche::h3::Header::new("user-agent", "quiche"),
+        quiche::h3::Header::new(b":method", b"GET"),
+        quiche::h3::Header::new(b":scheme", url.scheme().as_bytes()),
+        quiche::h3::Header::new(
+            b":authority",
+            url.host_str().unwrap().as_bytes(),
+        ),
+        quiche::h3::Header::new(b":path", path.as_bytes()),
+        quiche::h3::Header::new(b"user-agent", b"quiche"),
     ];
 
     let req_start = std::time::Instant::now();
@@ -169,7 +172,7 @@ fn main() {
                 break 'read;
             }
 
-            let len = match socket.recv(&mut buf) {
+            let (len, from) = match socket.recv_from(&mut buf) {
                 Ok(v) => v,
 
                 Err(e) => {
@@ -186,8 +189,10 @@ fn main() {
 
             debug!("got {} bytes", len);
 
+            let recv_info = quiche::RecvInfo { from };
+
             // Process potentially coalesced packets.
-            let read = match conn.recv(&mut buf[..len]) {
+            let read = match conn.recv(&mut buf[..len], recv_info) {
                 Ok(v) => v,
 
                 Err(e) => {
@@ -261,6 +266,15 @@ fn main() {
                         conn.close(true, 0x00, b"kthxbye").unwrap();
                     },
 
+                    Ok((_stream_id, quiche::h3::Event::Reset(e))) => {
+                        error!(
+                            "request was reset by peer with {}, closing...",
+                            e
+                        );
+
+                        conn.close(true, 0x00, b"kthxbye").unwrap();
+                    },
+
                     Ok((_flow_id, quiche::h3::Event::Datagram)) => (),
 
                     Ok((goaway_id, quiche::h3::Event::GoAway)) => {
@@ -283,7 +297,7 @@ fn main() {
         // Generate outgoing QUIC packets and send them on the UDP socket, until
         // quiche reports that there are no more packets to be sent.
         loop {
-            let write = match conn.send(&mut out) {
+            let (write, send_info) = match conn.send(&mut out) {
                 Ok(v) => v,
 
                 Err(quiche::Error::Done) => {
@@ -299,7 +313,7 @@ fn main() {
                 },
             };
 
-            if let Err(e) = socket.send(&out[..write]) {
+            if let Err(e) = socket.send_to(&out[..write], &send_info.to) {
                 if e.kind() == std::io::ErrorKind::WouldBlock {
                     debug!("send() would block");
                     break;

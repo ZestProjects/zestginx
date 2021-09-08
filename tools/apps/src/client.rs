@@ -81,7 +81,6 @@ pub fn connect(
     // Create the UDP socket backing the QUIC connection, and register it with
     // the event loop.
     let socket = std::net::UdpSocket::bind(bind_addr).unwrap();
-    socket.connect(peer_addr).unwrap();
 
     let socket = mio::net::UdpSocket::from_socket(socket).unwrap();
     poll.register(
@@ -128,6 +127,10 @@ pub fn connect(
         config.grease(false);
     }
 
+    if conn_args.early_data {
+        config.enable_early_data();
+    }
+
     config
         .set_cc_algorithm_name(&conn_args.cc_algorithm)
         .unwrap();
@@ -153,7 +156,8 @@ pub fn connect(
 
     // Create a QUIC connection and initiate handshake.
     let mut conn =
-        quiche::connect(connect_url.domain(), &scid, &mut config).unwrap();
+        quiche::connect(connect_url.domain(), &scid, peer_addr, &mut config)
+            .unwrap();
 
     if let Some(keylog) = &mut keylog {
         if let Ok(keylog) = keylog.try_clone() {
@@ -176,6 +180,12 @@ pub fn connect(
         }
     }
 
+    if let Some(session_file) = &args.session_file {
+        if let Ok(session) = std::fs::read(session_file) {
+            conn.set_session(&session).ok();
+        }
+    }
+
     info!(
         "connecting to {:} from {:} with scid {:?}",
         peer_addr,
@@ -183,9 +193,9 @@ pub fn connect(
         scid,
     );
 
-    let write = conn.send(&mut out).expect("initial send failed");
+    let (write, send_info) = conn.send(&mut out).expect("initial send failed");
 
-    while let Err(e) = socket.send(&out[..write]) {
+    while let Err(e) = socket.send_to(&out[..write], &send_info.to) {
         if e.kind() == std::io::ErrorKind::WouldBlock {
             trace!("send() would block");
             continue;
@@ -201,7 +211,9 @@ pub fn connect(
     let mut pkt_count = 0;
 
     loop {
-        poll.poll(&mut events, conn.timeout()).unwrap();
+        if !conn.is_in_early_data() || app_proto_selected {
+            poll.poll(&mut events, conn.timeout()).unwrap();
+        }
 
         // Read incoming UDP packets from the socket and feed them to quiche,
         // until there are no more packets to read.
@@ -217,7 +229,7 @@ pub fn connect(
                 break 'read;
             }
 
-            let len = match socket.recv(&mut buf) {
+            let (len, from) = match socket.recv_from(&mut buf) {
                 Ok(v) => v,
 
                 Err(e) => {
@@ -248,8 +260,10 @@ pub fn connect(
 
             pkt_count += 1;
 
+            let recv_info = quiche::RecvInfo { from };
+
             // Process potentially coalesced packets.
-            let read = match conn.recv(&mut buf[..len]) {
+            let read = match conn.recv(&mut buf[..len], recv_info) {
                 Ok(v) => v,
 
                 Err(e) => {
@@ -275,6 +289,12 @@ pub fn connect(
                 return Err(ClientError::HandshakeFail);
             }
 
+            if let Some(session_file) = &args.session_file {
+                if let Some(session) = conn.session() {
+                    std::fs::write(session_file, &session).ok();
+                }
+            }
+
             if let Some(h_conn) = http_conn {
                 if h_conn.report_incomplete(&app_data_start) {
                     return Err(ClientError::HttpFail);
@@ -290,7 +310,9 @@ pub fn connect(
 
         // Create a new application protocol session once the QUIC connection is
         // established.
-        if conn.is_established() && !app_proto_selected {
+        if (conn.is_established() || conn.is_in_early_data()) &&
+            !app_proto_selected
+        {
             // At this stage the ALPN negotiation succeeded and selected a
             // single application protocol name. We'll use this to construct
             // the correct type of HttpConn but `application_proto()`
@@ -300,7 +322,7 @@ pub fn connect(
             // is not much anyone can do to recover.
 
             let app_proto = conn.application_proto();
-            let app_proto = &std::str::from_utf8(&app_proto).unwrap();
+            let app_proto = &std::str::from_utf8(app_proto).unwrap();
 
             if alpns::HTTP_09.contains(app_proto) {
                 http_conn = Some(Http09Conn::with_urls(
@@ -361,7 +383,7 @@ pub fn connect(
         // Generate outgoing QUIC packets and send them on the UDP socket, until
         // quiche reports that there are no more packets to be sent.
         loop {
-            let write = match conn.send(&mut out) {
+            let (write, send_info) = match conn.send(&mut out) {
                 Ok(v) => v,
 
                 Err(quiche::Error::Done) => {
@@ -377,7 +399,7 @@ pub fn connect(
                 },
             };
 
-            if let Err(e) = socket.send(&out[..write]) {
+            if let Err(e) = socket.send_to(&out[..write], &send_info.to) {
                 if e.kind() == std::io::ErrorKind::WouldBlock {
                     trace!("send() would block");
                     break;
@@ -402,6 +424,12 @@ pub fn connect(
                 );
 
                 return Err(ClientError::HandshakeFail);
+            }
+
+            if let Some(session_file) = &args.session_file {
+                if let Some(session) = conn.session() {
+                    std::fs::write(session_file, &session).ok();
+                }
             }
 
             if let Some(h_conn) = http_conn {

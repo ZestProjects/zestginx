@@ -26,8 +26,8 @@
 
 //! CUBIC Congestion Control
 //!
-//! This implementation is based on the following RFC:
-//! <https://tools.ietf.org/html/rfc8312>
+//! This implementation is based on the following draft:
+//! <https://tools.ietf.org/html/draft-ietf-tcpm-rfc8312bis-02>
 //!
 //! Note that Slow Start can use HyStart++ when enabled.
 
@@ -49,6 +49,9 @@ pub static CUBIC: CongestionControlOps = CongestionControlOps {
     on_packet_acked,
     congestion_event,
     collapse_cwnd,
+    checkpoint,
+    rollback,
+    has_custom_pacing,
 };
 
 /// CUBIC Constants.
@@ -58,23 +61,53 @@ const BETA_CUBIC: f64 = 0.7;
 
 const C: f64 = 0.4;
 
+/// The packet count threshold to restore to the prior state if the
+/// lost packet count since the last checkpoint is less than the threshold.
+const RESTORE_COUNT_THRESHOLD: usize = 10;
+
+/// Default value of alpha_aimd in the beginning of congestion avoidance.
+const ALPHA_AIMD: f64 = 3.0 * (1.0 - BETA_CUBIC) / (1.0 + BETA_CUBIC);
+
 /// CUBIC State Variables.
 ///
 /// We need to keep those variables across the connection.
-/// k, w_max, w_last_max is described in the RFC.
+/// k, w_max, w_est are described in the RFC.
 #[derive(Debug, Default)]
 pub struct State {
     k: f64,
 
     w_max: f64,
 
-    w_last_max: f64,
+    w_est: f64,
+
+    alpha_aimd: f64,
 
     // Used in CUBIC fix (see on_packet_sent())
     last_sent_time: Option<Instant>,
 
     // Store cwnd increment during congestion avoidance.
     cwnd_inc: usize,
+
+    // CUBIC state checkpoint preceding the last congestion event.
+    prior: PriorState,
+}
+
+/// Stores the CUBIC state from before the last congestion event.
+///
+/// <https://tools.ietf.org/id/draft-ietf-tcpm-rfc8312bis-00.html#section-4.9>
+#[derive(Debug, Default)]
+struct PriorState {
+    congestion_window: usize,
+
+    ssthresh: usize,
+
+    w_max: f64,
+
+    k: f64,
+
+    epoch_start: Option<Instant>,
+
+    lost_count: usize,
 }
 
 /// CUBIC Functions.
@@ -83,13 +116,15 @@ pub struct State {
 /// not packets.
 /// Unit of t (duration) and RTT are based on seconds (f64).
 impl State {
-    // K = cbrt(w_max * (1 - beta_cubic) / C) (Eq. 2)
-    fn cubic_k(&self, max_datagram_size: usize) -> f64 {
+    // K = cubic_root ((w_max - cwnd) / C) (Eq. 2)
+    fn cubic_k(&self, cwnd: usize, max_datagram_size: usize) -> f64 {
         let w_max = self.w_max / max_datagram_size as f64;
-        libm::cbrt(w_max * (1.0 - BETA_CUBIC) / C)
+        let cwnd = cwnd as f64 / max_datagram_size as f64;
+
+        libm::cbrt((w_max - cwnd) / C)
     }
 
-    // W_cubic(t) = C * (t - K)^3 - w_max (Eq. 1)
+    // W_cubic(t) = C * (t - K)^3 + w_max (Eq. 1)
     fn w_cubic(&self, t: Duration, max_datagram_size: usize) -> f64 {
         let w_max = self.w_max / max_datagram_size as f64;
 
@@ -97,14 +132,11 @@ impl State {
             max_datagram_size as f64
     }
 
-    // W_est(t) = w_max * beta_cubic + 3 * (1 - beta_cubic) / (1 + beta_cubic) *
-    // (t / RTT) (Eq. 4)
-    fn w_est(&self, t: Duration, rtt: Duration, max_datagram_size: usize) -> f64 {
-        let w_max = self.w_max / max_datagram_size as f64;
-        (w_max * BETA_CUBIC +
-            3.0 * (1.0 - BETA_CUBIC) / (1.0 + BETA_CUBIC) * t.as_secs_f64() /
-                rtt.as_secs_f64()) *
-            max_datagram_size as f64
+    // W_est = W_est + alpha_aimd * (segments_acked / cwnd)  (Eq. 4)
+    fn w_est_inc(
+        &self, acked: usize, cwnd: usize, max_datagram_size: usize,
+    ) -> f64 {
+        self.alpha_aimd * (acked as f64 / cwnd as f64) * max_datagram_size as f64
     }
 }
 
@@ -113,8 +145,7 @@ fn collapse_cwnd(r: &mut Recovery) {
 
     r.congestion_recovery_start_time = None;
 
-    cubic.w_last_max = r.congestion_window as f64;
-    cubic.w_max = cubic.w_last_max;
+    cubic.w_max = r.congestion_window as f64;
 
     // 4.7 Timeout - reduce ssthresh based on BETA_CUBIC
     r.ssthresh = (r.congestion_window as f64 * BETA_CUBIC) as usize;
@@ -161,6 +192,13 @@ fn on_packet_acked(
     r.bytes_in_flight = r.bytes_in_flight.saturating_sub(packet.size);
 
     if in_congestion_recovery {
+        r.prr.on_packet_acked(
+            packet.size,
+            r.bytes_in_flight,
+            r.ssthresh,
+            r.max_datagram_size,
+        );
+
         return;
     }
 
@@ -168,47 +206,66 @@ fn on_packet_acked(
         return;
     }
 
-    if r.congestion_window < r.ssthresh {
-        // Slow start.
-        let cwnd_inc = cmp::min(
-            packet.size,
-            r.max_datagram_size * recovery::ABC_L -
-                cmp::min(
-                    r.bytes_acked_sl,
-                    r.max_datagram_size * recovery::ABC_L,
-                ),
-        );
+    // Detecting spurious congestion events.
+    // <https://tools.ietf.org/id/draft-ietf-tcpm-rfc8312bis-00.html#section-4.9>
+    //
+    // When the recovery episode ends with recovering
+    // a few packets (less than RESTORE_COUNT_THRESHOLD), it's considered
+    // as spurious and restore to the previous state.
+    if r.congestion_recovery_start_time.is_some() {
+        let new_lost = r.lost_count - r.cubic_state.prior.lost_count;
 
+        if new_lost < RESTORE_COUNT_THRESHOLD {
+            let did_rollback = rollback(r);
+
+            if did_rollback {
+                return;
+            }
+        }
+    }
+
+    if r.congestion_window < r.ssthresh {
         // In Slow slart, bytes_acked_sl is used for counting
         // acknowledged bytes.
         r.bytes_acked_sl += packet.size;
 
-        r.congestion_window += cwnd_inc;
+        if r.bytes_acked_sl >= r.max_datagram_size {
+            if r.hystart.in_css(epoch) {
+                r.congestion_window +=
+                    r.hystart.css_cwnd_inc(r.max_datagram_size);
+            } else {
+                r.congestion_window += r.max_datagram_size;
+            }
 
-        if r.hystart.enabled() &&
-            epoch == packet::EPOCH_APPLICATION &&
-            r.hystart.try_enter_lss(
-                packet,
-                r.latest_rtt,
-                r.congestion_window,
-                now,
-                r.max_datagram_size,
-            )
-        {
+            r.bytes_acked_sl -= r.max_datagram_size;
+        }
+
+        if r.hystart.on_packet_acked(
+            epoch,
+            packet,
+            r.latest_rtt,
+            r.congestion_window,
+            now,
+            r.max_datagram_size,
+        ) {
+            // Exit to congestion avoidance if CSS ends.
             r.ssthresh = r.congestion_window;
         }
     } else {
         // Congestion avoidance.
         let ca_start_time;
 
-        // In LSS, use lss_start_time instead of congestion_recovery_start_time.
-        if r.hystart.in_lss(epoch) {
-            ca_start_time = r.hystart.lss_start_time().unwrap();
+        // In CSS, use css_start_time instead of congestion_recovery_start_time.
+        if r.hystart.in_css(epoch) {
+            ca_start_time = r.hystart.css_start_time().unwrap();
 
-            // Reset w_max and k when LSS started.
+            // Reset w_max and k when CSS started.
             if r.cubic_state.w_max == 0.0 {
                 r.cubic_state.w_max = r.congestion_window as f64;
                 r.cubic_state.k = 0.0;
+
+                r.cubic_state.w_est = r.congestion_window as f64;
+                r.cubic_state.alpha_aimd = ALPHA_AIMD;
             }
         } else {
             match r.congestion_recovery_start_time {
@@ -221,56 +278,53 @@ fn on_packet_acked(
 
                     r.cubic_state.w_max = r.congestion_window as f64;
                     r.cubic_state.k = 0.0;
+
+                    r.cubic_state.w_est = r.congestion_window as f64;
+                    r.cubic_state.alpha_aimd = ALPHA_AIMD;
                 },
             }
         }
 
         let t = now - ca_start_time;
 
-        // w_cubic(t + rtt)
-        let w_cubic = r.cubic_state.w_cubic(t + r.min_rtt, r.max_datagram_size);
+        // target = w_cubic(t + rtt)
+        let target = r.cubic_state.w_cubic(t + r.min_rtt, r.max_datagram_size);
 
-        // w_est(t)
-        let w_est = r.cubic_state.w_est(t, r.min_rtt, r.max_datagram_size);
+        // Clipping target to [cwnd, 1.5 x cwnd]
+        let target = f64::max(target, r.congestion_window as f64);
+        let target = f64::min(target, r.congestion_window as f64 * 1.5);
+
+        // Update w_est.
+        let w_est_inc = r.cubic_state.w_est_inc(
+            packet.size,
+            r.congestion_window,
+            r.max_datagram_size,
+        );
+        r.cubic_state.w_est += w_est_inc;
+
+        if r.cubic_state.w_est >= r.cubic_state.w_max {
+            r.cubic_state.alpha_aimd = 1.0;
+        }
 
         let mut cubic_cwnd = r.congestion_window;
 
-        if w_cubic < w_est {
-            // TCP friendly region.
-            cubic_cwnd = cmp::max(cubic_cwnd, w_est as usize);
-        } else if cubic_cwnd < w_cubic as usize {
+        if r.cubic_state.w_cubic(t, r.max_datagram_size) < r.cubic_state.w_est {
+            // AIMD friendly region (W_cubic(t) < W_est)
+            cubic_cwnd = cmp::max(cubic_cwnd, r.cubic_state.w_est as usize);
+        } else {
             // Concave region or convex region use same increment.
-            let cubic_inc = (w_cubic - cubic_cwnd as f64) / cubic_cwnd as f64 *
-                r.max_datagram_size as f64;
+            let cubic_inc =
+                r.max_datagram_size * (target as usize - cubic_cwnd) / cubic_cwnd;
 
-            cubic_cwnd += cubic_inc as usize;
-        }
-
-        // When in Limited Slow Start, take the max of CA cwnd and
-        // LSS cwnd.
-        if r.hystart.in_lss(epoch) {
-            let lss_cwnd = r.hystart.lss_cwnd(
-                packet.size,
-                r.bytes_acked_sl,
-                r.congestion_window,
-                r.ssthresh,
-                r.max_datagram_size,
-            );
-
-            r.bytes_acked_sl += packet.size;
-
-            cubic_cwnd = cmp::max(cubic_cwnd, lss_cwnd);
+            cubic_cwnd += cubic_inc;
         }
 
         // Update the increment and increase cwnd by MSS.
         r.cubic_state.cwnd_inc += cubic_cwnd - r.congestion_window;
 
-        // cwnd_inc can be more than 1 MSS in the late stage of max probing.
-        // however QUIC recovery draft 7.4 (Congestion Avoidance) limits
-        // the increase of cwnd to 1 max_datagram_size per cwnd acknowledged.
         if r.cubic_state.cwnd_inc >= r.max_datagram_size {
             r.congestion_window += r.max_datagram_size;
-            r.cubic_state.cwnd_inc = 0;
+            r.cubic_state.cwnd_inc -= r.max_datagram_size;
         }
     }
 }
@@ -286,30 +340,66 @@ fn congestion_event(
         r.congestion_recovery_start_time = Some(now);
 
         // Fast convergence
-        if r.cubic_state.w_max < r.cubic_state.w_last_max {
-            r.cubic_state.w_last_max = r.cubic_state.w_max;
+        if (r.congestion_window as f64) < r.cubic_state.w_max {
             r.cubic_state.w_max =
-                r.cubic_state.w_max as f64 * (1.0 + BETA_CUBIC) / 2.0;
+                r.congestion_window as f64 * (1.0 + BETA_CUBIC) / 2.0;
         } else {
-            r.cubic_state.w_last_max = r.cubic_state.w_max;
+            r.cubic_state.w_max = r.congestion_window as f64;
         }
 
-        r.cubic_state.w_max = r.congestion_window as f64;
-        r.ssthresh = (r.cubic_state.w_max * BETA_CUBIC) as usize;
+        r.ssthresh = (r.congestion_window as f64 * BETA_CUBIC) as usize;
         r.ssthresh = cmp::max(
             r.ssthresh,
             r.max_datagram_size * recovery::MINIMUM_WINDOW_PACKETS,
         );
         r.congestion_window = r.ssthresh;
-        r.cubic_state.k = r.cubic_state.cubic_k(r.max_datagram_size);
+
+        r.cubic_state.k = if r.cubic_state.w_max < r.congestion_window as f64 {
+            0.0
+        } else {
+            r.cubic_state
+                .cubic_k(r.congestion_window, r.max_datagram_size)
+        };
 
         r.cubic_state.cwnd_inc =
             (r.cubic_state.cwnd_inc as f64 * BETA_CUBIC) as usize;
 
-        if r.hystart.in_lss(epoch) {
+        r.cubic_state.w_est = r.congestion_window as f64;
+        r.cubic_state.alpha_aimd = ALPHA_AIMD;
+
+        if r.hystart.in_css(epoch) {
             r.hystart.congestion_event();
         }
+
+        r.prr.congestion_event(r.bytes_in_flight);
     }
+}
+
+fn checkpoint(r: &mut Recovery) {
+    r.cubic_state.prior.congestion_window = r.congestion_window;
+    r.cubic_state.prior.ssthresh = r.ssthresh;
+    r.cubic_state.prior.w_max = r.cubic_state.w_max;
+    r.cubic_state.prior.k = r.cubic_state.k;
+    r.cubic_state.prior.epoch_start = r.congestion_recovery_start_time;
+    r.cubic_state.prior.lost_count = r.lost_count;
+}
+
+fn rollback(r: &mut Recovery) -> bool {
+    if r.congestion_window >= r.cubic_state.prior.congestion_window {
+        return false;
+    }
+
+    r.congestion_window = r.cubic_state.prior.congestion_window;
+    r.ssthresh = r.cubic_state.prior.ssthresh;
+    r.cubic_state.w_max = r.cubic_state.prior.w_max;
+    r.cubic_state.k = r.cubic_state.prior.k;
+    r.congestion_recovery_start_time = r.cubic_state.prior.epoch_start;
+
+    true
+}
+
+fn has_custom_pacing() -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -384,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn cubic_slow_start_abc_l() {
+    fn cubic_slow_start_multi_acks() {
         let mut cfg = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
         cfg.set_cc_algorithm(recovery::CongestionControlAlgorithm::CUBIC);
 
@@ -418,24 +508,24 @@ mod tests {
             Acked {
                 pkt_num: p.pkt_num,
                 time_sent: p.time_sent,
-                size: p.size * 3,
+                size: p.size,
             },
             Acked {
                 pkt_num: p.pkt_num,
                 time_sent: p.time_sent,
-                size: p.size * 3,
+                size: p.size,
             },
             Acked {
                 pkt_num: p.pkt_num,
                 time_sent: p.time_sent,
-                size: p.size * 3,
+                size: p.size,
             },
         ];
 
         r.on_packets_acked(acked, packet::EPOCH_APPLICATION, now);
 
-        // Acked 3 packets, but cwnd will increase 2 x mss.
-        assert_eq!(r.cwnd(), cwnd_prev + p.size * recovery::ABC_L);
+        // Acked 3 packets.
+        assert_eq!(r.cwnd(), cwnd_prev + p.size * 3);
     }
 
     #[test]
@@ -460,7 +550,7 @@ mod tests {
         cfg.set_cc_algorithm(recovery::CongestionControlAlgorithm::CUBIC);
 
         let mut r = Recovery::new(&cfg);
-        let now = Instant::now();
+        let mut now = Instant::now();
         let prev_cwnd = r.cwnd();
 
         // Send initcwnd full MSS packets to become no longer app limited
@@ -475,20 +565,30 @@ mod tests {
         let cur_cwnd = (prev_cwnd as f64 * BETA_CUBIC) as usize;
         assert_eq!(r.cwnd(), cur_cwnd);
 
+        // Shift current time by 1 RTT.
         let rtt = Duration::from_millis(100);
 
-        let acked = vec![Acked {
-            pkt_num: 0,
-            // To exit from recovery
-            time_sent: now + rtt,
-            size: r.max_datagram_size,
-        }];
-
-        // Ack more than cwnd bytes with rtt=100ms
         r.update_rtt(rtt, Duration::from_millis(0), now);
-        r.on_packets_acked(acked, packet::EPOCH_APPLICATION, now + rtt * 3);
 
-        // After acking more than cwnd, expect cwnd increased by MSS
+        // Exit from the recovery.
+        now += rtt;
+
+        // To avoid rollback
+        r.lost_count += RESTORE_COUNT_THRESHOLD;
+
+        // During Congestion Avoidance, it will take
+        // 5 ACKs to increase cwnd by 1 MSS.
+        for _ in 0..5 {
+            let acked = vec![Acked {
+                pkt_num: 0,
+                time_sent: now,
+                size: r.max_datagram_size,
+            }];
+
+            r.on_packets_acked(acked, packet::EPOCH_APPLICATION, now);
+            now += rtt;
+        }
+
         assert_eq!(r.cwnd(), cur_cwnd + r.max_datagram_size);
     }
 
@@ -530,14 +630,13 @@ mod tests {
     }
 
     #[test]
-    fn cubic_hystart_limited_slow_start() {
+    fn cubic_hystart_css_to_ss() {
         let mut cfg = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
         cfg.set_cc_algorithm(recovery::CongestionControlAlgorithm::CUBIC);
         cfg.enable_hystart(true);
 
         let mut r = Recovery::new(&cfg);
         let now = Instant::now();
-        let pkt_num = 0;
         let epoch = packet::EPOCH_APPLICATION;
 
         let p = recovery::Sent {
@@ -558,91 +657,342 @@ mod tests {
 
         // 1st round.
         let n_rtt_sample = hystart::N_RTT_SAMPLE;
-        let pkts_1st_round = n_rtt_sample as u64;
-        r.hystart.start_round(pkt_num);
+        let mut send_pn = 0;
+        let mut ack_pn = 0;
 
-        let rtt_1st = 50;
+        let rtt_1st = Duration::from_millis(50);
 
         // Send 1st round packets.
         for _ in 0..n_rtt_sample {
             r.on_packet_sent_cc(p.size, now);
+            send_pn += 1;
         }
 
+        r.hystart.start_round(send_pn - 1);
+
         // Receving Acks.
-        let now = now + Duration::from_millis(rtt_1st);
+        let now = now + rtt_1st;
         for _ in 0..n_rtt_sample {
-            r.update_rtt(
-                Duration::from_millis(rtt_1st),
-                Duration::from_millis(0),
-                now,
-            );
+            r.update_rtt(rtt_1st, Duration::from_millis(0), now);
 
             let acked = vec![Acked {
-                pkt_num: p.pkt_num,
+                pkt_num: ack_pn,
                 time_sent: p.time_sent,
                 size: p.size,
             }];
 
             r.on_packets_acked(acked, epoch, now);
+            ack_pn += 1;
         }
 
-        // Not in LSS yet.
-        assert_eq!(r.hystart.lss_start_time().is_some(), false);
+        // Not in CSS yet.
+        assert_eq!(r.hystart.css_start_time().is_some(), false);
 
         // 2nd round.
-        r.hystart.start_round(pkts_1st_round * 2);
-
-        let mut rtt_2nd = 100;
-        let now = now + Duration::from_millis(rtt_2nd);
+        let mut rtt_2nd = Duration::from_millis(100);
+        let now = now + rtt_2nd;
 
         // Send 2nd round packets.
         for _ in 0..n_rtt_sample {
             r.on_packet_sent_cc(p.size, now);
+            send_pn += 1;
         }
+        r.hystart.start_round(send_pn - 1);
 
         // Receving Acks.
-        // Last ack will cause to exit to LSS.
+        // Last ack will cause to exit to CSS.
         let mut cwnd_prev = r.cwnd();
 
         for _ in 0..n_rtt_sample {
             cwnd_prev = r.cwnd();
-            r.update_rtt(
-                Duration::from_millis(rtt_2nd),
-                Duration::from_millis(0),
-                now,
-            );
+            r.update_rtt(rtt_2nd, Duration::from_millis(0), now);
 
             let acked = vec![Acked {
-                pkt_num: p.pkt_num,
+                pkt_num: ack_pn,
                 time_sent: p.time_sent,
                 size: p.size,
             }];
 
             r.on_packets_acked(acked, epoch, now);
+            ack_pn += 1;
 
-            // Keep increasing RTT so that hystart exits to LSS.
-            rtt_2nd += 4;
+            // Keep increasing RTT so that hystart exits to CSS.
+            rtt_2nd += rtt_2nd.saturating_add(Duration::from_millis(4));
         }
 
-        // Now we are in LSS.
-        assert_eq!(r.hystart.lss_start_time().is_some(), true);
+        // Now we are in CSS.
+        assert_eq!(r.hystart.css_start_time().is_some(), true);
         assert_eq!(r.cwnd(), cwnd_prev + r.max_datagram_size);
 
-        // Send a full cwnd.
-        r.on_packet_sent_cc(r.cwnd(), now);
-
-        // Ack'ing 4 packets to increase cwnd by 1 MSS during LSS
+        // 3rd round, which RTT is less than previous round to
+        // trigger back to Slow Start.
+        let rtt_3rd = Duration::from_millis(80);
+        let now = now + rtt_3rd;
         cwnd_prev = r.cwnd();
-        for _ in 0..4 {
+
+        // Send 3nd round packets.
+        for _ in 0..n_rtt_sample {
+            r.on_packet_sent_cc(p.size, now);
+            send_pn += 1;
+        }
+        r.hystart.start_round(send_pn - 1);
+
+        // Receving Acks.
+        // Last ack will cause to exit to SS.
+        for _ in 0..n_rtt_sample {
+            r.update_rtt(rtt_3rd, Duration::from_millis(0), now);
+
             let acked = vec![Acked {
-                pkt_num: p.pkt_num,
+                pkt_num: ack_pn,
                 time_sent: p.time_sent,
                 size: p.size,
             }];
+
             r.on_packets_acked(acked, epoch, now);
+            ack_pn += 1;
         }
 
-        // During LSS cwnd will be increased less than usual slow start.
+        // Now we are back in Slow Start.
+        assert_eq!(r.hystart.css_start_time().is_some(), false);
+        assert_eq!(
+            r.cwnd(),
+            cwnd_prev +
+                r.max_datagram_size / hystart::CSS_GROWTH_DIVISOR *
+                    hystart::N_RTT_SAMPLE
+        );
+    }
+
+    #[test]
+    fn cubic_hystart_css_to_ca() {
+        let mut cfg = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
+        cfg.set_cc_algorithm(recovery::CongestionControlAlgorithm::CUBIC);
+        cfg.enable_hystart(true);
+
+        let mut r = Recovery::new(&cfg);
+        let now = Instant::now();
+        let epoch = packet::EPOCH_APPLICATION;
+
+        let p = recovery::Sent {
+            pkt_num: 0,
+            frames: vec![],
+            time_sent: now,
+            time_acked: None,
+            time_lost: None,
+            size: r.max_datagram_size,
+            ack_eliciting: true,
+            in_flight: true,
+            delivered: 0,
+            delivered_time: now,
+            recent_delivered_packet_sent_time: now,
+            is_app_limited: false,
+            has_data: false,
+        };
+
+        // 1st round.
+        let n_rtt_sample = hystart::N_RTT_SAMPLE;
+        let mut send_pn = 0;
+        let mut ack_pn = 0;
+
+        let rtt_1st = Duration::from_millis(50);
+
+        // Send 1st round packets.
+        for _ in 0..n_rtt_sample {
+            r.on_packet_sent_cc(p.size, now);
+            send_pn += 1;
+        }
+
+        r.hystart.start_round(send_pn - 1);
+
+        // Receving Acks.
+        let now = now + rtt_1st;
+        for _ in 0..n_rtt_sample {
+            r.update_rtt(rtt_1st, Duration::from_millis(0), now);
+
+            let acked = vec![Acked {
+                pkt_num: ack_pn,
+                time_sent: p.time_sent,
+                size: p.size,
+            }];
+
+            r.on_packets_acked(acked, epoch, now);
+            ack_pn += 1;
+        }
+
+        // Not in CSS yet.
+        assert_eq!(r.hystart.css_start_time().is_some(), false);
+
+        // 2nd round.
+        let mut rtt_2nd = Duration::from_millis(100);
+        let now = now + rtt_2nd;
+
+        // Send 2nd round packets.
+        for _ in 0..n_rtt_sample {
+            r.on_packet_sent_cc(p.size, now);
+            send_pn += 1;
+        }
+        r.hystart.start_round(send_pn - 1);
+
+        // Receving Acks.
+        // Last ack will cause to exit to CSS.
+        let mut cwnd_prev = r.cwnd();
+
+        for _ in 0..n_rtt_sample {
+            cwnd_prev = r.cwnd();
+            r.update_rtt(rtt_2nd, Duration::from_millis(0), now);
+
+            let acked = vec![Acked {
+                pkt_num: ack_pn,
+                time_sent: p.time_sent,
+                size: p.size,
+            }];
+
+            r.on_packets_acked(acked, epoch, now);
+            ack_pn += 1;
+
+            // Keep increasing RTT so that hystart exits to CSS.
+            rtt_2nd += rtt_2nd.saturating_add(Duration::from_millis(4));
+        }
+
+        // Now we are in CSS.
+        assert_eq!(r.hystart.css_start_time().is_some(), true);
         assert_eq!(r.cwnd(), cwnd_prev + r.max_datagram_size);
+
+        // Run 5 (CSS_ROUNDS) in CSS, to exit to congestion avoidance.
+        let rtt_css = Duration::from_millis(100);
+        let now = now + rtt_css;
+
+        for _ in 0..hystart::CSS_ROUNDS {
+            // Send a round of packets.
+            for _ in 0..n_rtt_sample {
+                r.on_packet_sent_cc(p.size, now);
+                send_pn += 1;
+            }
+            r.hystart.start_round(send_pn - 1);
+
+            // Receving Acks.
+            for _ in 0..n_rtt_sample {
+                r.update_rtt(rtt_css, Duration::from_millis(0), now);
+
+                let acked = vec![Acked {
+                    pkt_num: ack_pn,
+                    time_sent: p.time_sent,
+                    size: p.size,
+                }];
+
+                r.on_packets_acked(acked, epoch, now);
+                ack_pn += 1;
+            }
+        }
+
+        // Now we are in congestion avoidance.
+        assert_eq!(r.cwnd(), r.ssthresh);
+    }
+
+    #[test]
+    fn cubic_spurious_congestion_event() {
+        let mut cfg = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
+        cfg.set_cc_algorithm(recovery::CongestionControlAlgorithm::CUBIC);
+
+        let mut r = Recovery::new(&cfg);
+        let now = Instant::now();
+        let prev_cwnd = r.cwnd();
+
+        // Send initcwnd full MSS packets to become no longer app limited
+        for _ in 0..recovery::INITIAL_WINDOW_PACKETS {
+            r.on_packet_sent_cc(r.max_datagram_size, now);
+        }
+
+        // Trigger congestion event to update ssthresh
+        r.congestion_event(now, packet::EPOCH_APPLICATION, now);
+
+        // After congestion event, cwnd will be reduced.
+        let cur_cwnd = (prev_cwnd as f64 * BETA_CUBIC) as usize;
+        assert_eq!(r.cwnd(), cur_cwnd);
+
+        let rtt = Duration::from_millis(100);
+
+        let acked = vec![Acked {
+            pkt_num: 0,
+            // To exit from recovery
+            time_sent: now + rtt,
+            size: r.max_datagram_size,
+        }];
+
+        // Ack more than cwnd bytes with rtt=100ms
+        r.update_rtt(rtt, Duration::from_millis(0), now);
+
+        // Trigger detecting sprurious congestion event
+        r.on_packets_acked(
+            acked,
+            packet::EPOCH_APPLICATION,
+            now + rtt + Duration::from_millis(5),
+        );
+
+        // cwnd is restored to the previous one.
+        assert_eq!(r.cwnd(), prev_cwnd);
+    }
+
+    #[test]
+    fn cubic_fast_convergence() {
+        let mut cfg = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
+        cfg.set_cc_algorithm(recovery::CongestionControlAlgorithm::CUBIC);
+
+        let mut r = Recovery::new(&cfg);
+        let mut now = Instant::now();
+        let prev_cwnd = r.cwnd();
+
+        // Send initcwnd full MSS packets to become no longer app limited
+        for _ in 0..recovery::INITIAL_WINDOW_PACKETS {
+            r.on_packet_sent_cc(r.max_datagram_size, now);
+        }
+
+        // Trigger congestion event to update ssthresh
+        r.congestion_event(now, packet::EPOCH_APPLICATION, now);
+
+        // After 1st congestion event, cwnd will be reduced.
+        let cur_cwnd = (prev_cwnd as f64 * BETA_CUBIC) as usize;
+        assert_eq!(r.cwnd(), cur_cwnd);
+
+        // Shift current time by 1 RTT.
+        let rtt = Duration::from_millis(100);
+        r.update_rtt(rtt, Duration::from_millis(0), now);
+
+        // Exit from the recovery.
+        now += rtt;
+
+        // To avoid rollback
+        r.lost_count += RESTORE_COUNT_THRESHOLD;
+
+        // During Congestion Avoidance, it will take
+        // 5 ACKs to increase cwnd by 1 MSS.
+        for _ in 0..5 {
+            let acked = vec![Acked {
+                pkt_num: 0,
+                time_sent: now,
+                size: r.max_datagram_size,
+            }];
+
+            r.on_packets_acked(acked, packet::EPOCH_APPLICATION, now);
+            now += rtt;
+        }
+
+        assert_eq!(r.cwnd(), cur_cwnd + r.max_datagram_size);
+
+        let prev_cwnd = r.cwnd();
+
+        // Fast convergence: now there is 2nd congestion event and
+        // cwnd is not fully recovered to w_max, w_max will be
+        // further reduced.
+        r.congestion_event(now, packet::EPOCH_APPLICATION, now);
+
+        // After 2nd congestion event, cwnd will be reduced.
+        let cur_cwnd = (prev_cwnd as f64 * BETA_CUBIC) as usize;
+        assert_eq!(r.cwnd(), cur_cwnd);
+
+        // w_max will be further reduced, not prev_cwnd
+        assert_eq!(
+            r.cubic_state.w_max,
+            prev_cwnd as f64 * (1.0 + BETA_CUBIC) / 2.0
+        );
     }
 }

@@ -14,49 +14,57 @@ WWW_DIR=/www
 DOWNLOAD_DIR=/downloads
 QUICHE_CLIENT=quiche-client
 QUICHE_SERVER=quiche-server
-QUICHE_CLIENT_OPT="--no-verify --dump-responses ${DOWNLOAD_DIR} --wire-version ff00001d"
+QUICHE_CLIENT_OPT="--no-verify --dump-responses ${DOWNLOAD_DIR} --wire-version 00000001"
 QUICHE_SERVER_OPT_COMMON="--listen [::]:443 --root $WWW_DIR --cert /certs/cert.pem --key /certs/priv.key"
 QUICHE_SERVER_OPT="$QUICHE_SERVER_OPT_COMMON --no-retry "
 LOG_DIR=/logs
 LOG=$LOG_DIR/log.txt
 
 check_testcase () {
-    TESTNAME=$1
-
     case $1 in
-    handshake | multiconnect | http3 )
-        echo "supported"
-        ;;
-    transfer )
-        echo "supported"
-        ;;
-    chacha20 )
-        if [ "$ROLE" == "client" ]; then
-            # We don't support selecting a cipher on the client-side.
+        handshake | multiconnect | http3 )
+            echo "supported"
+            ;;
+
+        transfer )
+            echo "supported"
+            ;;
+
+        chacha20 )
+            if [ "$ROLE" == "client" ]; then
+                # We don't support selecting a cipher on the client-side.
+                echo "unsupported"
+                exit 127
+            elif [ "$ROLE" == "server" ]; then
+                echo "supported"
+            fi
+            ;;
+
+        resumption )
+            echo "supported"
+            QUICHE_CLIENT_OPT="$QUICHE_CLIENT_OPT --session-file=session.bin"
+            ;;
+
+        zerortt )
+            if [ "$ROLE" == "client" ]; then
+                echo "supported"
+                QUICHE_CLIENT_OPT="$QUICHE_CLIENT_OPT --session-file=session.bin --early-data"
+            elif [ "$ROLE" == "server" ]; then
+                echo "supported"
+                QUICHE_SERVER_OPT="$QUICHE_SERVER_OPT --early-data"
+            fi
+            ;;
+
+        retry )
+            echo "supported"
+            QUICHE_SERVER_OPT="$QUICHE_SERVER_OPT_COMMON"
+            ;;
+
+        *)
             echo "unsupported"
             exit 127
-        elif [ "$ROLE" == "server" ]; then
-            echo "supported"
-        fi
-        ;;
-    resumption | zerortt )
-        if [ "$ROLE" == "client" ]; then
-            # We don't support session resumption on the client-side yet.
-            echo "unsupported"
-            exit 127
-        elif [ "$ROLE" == "server" ]; then
-            echo "supported"
-            QUICHE_SERVER_OPT="$QUICHE_SERVER_OPT --early-data"
-        fi
-        ;;
-    retry )
-        echo "supported"
-        QUICHE_SERVER_OPT="$QUICHE_SERVER_OPT_COMMON"
-        ;;
-    *)
-        echo "unsupported"
-        exit 127
-        ;;
+            ;;
+
     esac
 }
 
@@ -65,20 +73,21 @@ run_quiche_client_tests () {
     # remove this sleep when the issue above is resolved.
     sleep 3
 
-    if [ "$TESTCASE" == "multiconnect" ]; then
+    case $1 in
+        multiconnect | resumption | zerortt )
+            for req in $REQUESTS
+            do
+                $QUICHE_DIR/$QUICHE_CLIENT $QUICHE_CLIENT_OPT \
+                    $CLIENT_PARAMS $req >> $LOG 2>&1
+            done
+            ;;
 
-        for req in $REQUESTS
-        do
+        *)
             $QUICHE_DIR/$QUICHE_CLIENT $QUICHE_CLIENT_OPT \
-                $CLIENT_PARAMS $req >> $LOG 2>&1
-        done
+                $CLIENT_PARAMS $REQUESTS >& $LOG
+            ;;
 
-    else
-
-        $QUICHE_DIR/$QUICHE_CLIENT $QUICHE_CLIENT_OPT \
-            $CLIENT_PARAMS $REQUESTS >& $LOG
-
-    fi
+    esac
 }
 
 run_quiche_server_tests() {
@@ -98,7 +107,7 @@ if [ "$ROLE" == "client" ]; then
     echo "## Client params: $CLIENT_PARAMS"
     echo "## Requests: $REQUESTS"
     echo "## Test case: $TESTCASE"
-    run_quiche_client_tests
+    run_quiche_client_tests $TESTCASE
 elif [ "$ROLE" == "server" ]; then
     echo "## Starting quiche server..."
     echo "## Server params: $SERVER_PARAMS"
