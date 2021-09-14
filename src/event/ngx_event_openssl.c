@@ -2957,8 +2957,6 @@ ngx_ssl_shutdown(ngx_connection_t *c)
 
     ngx_ssl_ocsp_cleanup(c);
 
-    ngx_ssl_ocsp_cleanup(c);
-
     if (SSL_in_init(c->ssl->connection)) {
         /*
          * OpenSSL 1.0.2f complains if SSL_shutdown() is called during
