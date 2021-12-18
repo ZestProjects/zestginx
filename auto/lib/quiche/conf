@@ -12,7 +12,7 @@ if [ $QUICHE != NONE ]; then
         QUICHE_BUILD_TARGET="debug"
     fi
 
-    CORE_INCS="$CORE_INCS $QUICHE/include"
+    CORE_INCS="$CORE_INCS $QUICHE/quiche/include"
     CORE_DEPS="$CORE_DEPS $QUICHE/target/$QUICHE_BUILD_TARGET/libquiche.a"
     CORE_LIBS="$CORE_LIBS $QUICHE/target/$QUICHE_BUILD_TARGET/libquiche.a $NGX_LIBPTHREAD -lm"
 

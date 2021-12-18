@@ -150,7 +150,7 @@ PCRE_CONF_OPT=
 PCRE_JIT=YES
 
 USE_OPENSSL=NO
-OPENSSL="modules/quiche/deps/boringssl"
+OPENSSL="modules/quiche/quiche/deps/boringssl"
 
 USE_QUICHE=NO
 QUICHE="modules/quiche"
