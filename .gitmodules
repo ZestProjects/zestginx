@@ -3,6 +3,6 @@
         url = https://github.com/google/brotli.git
 
 [submodule "boringssl"]
-        path = modules/quiche/deps/boringssl
+        path = modules/quiche/quiche/deps/boringssl
         url = https://github.com/google/boringssl.git
         ignore = dirty
