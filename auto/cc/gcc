@@ -164,6 +164,8 @@ case "$NGX_GCC_VER" in
     ;;
 esac
 
+# dont warn on vla-parameter
+CFLAGS="$CFLAGS -Wno-vla-parameter"
 
 # stop on warning
 CFLAGS="$CFLAGS -Werror"
