@@ -148,6 +148,7 @@ PCRE=NONE
 PCRE_OPT=
 PCRE_CONF_OPT=
 PCRE_JIT=YES
+PCRE2=YES
 
 USE_OPENSSL=NO
 OPENSSL="modules/quiche/quiche/deps/boringssl"
@@ -369,6 +370,7 @@ use the \"--without-mail_ssl_module\" option instead"
         --with-pcre=*)                   PCRE="$value"              ;;
         --with-pcre-opt=*)               PCRE_OPT="$value"          ;;
         --without-pcre-jit)              PCRE_JIT=NO                ;;
+        --without-pcre2)                 PCRE2=DISABLED             ;;
 
         --with-openssl=*)                OPENSSL="$value"           ;;
         --with-openssl-opt=*)            OPENSSL_OPT="$value"       ;;
@@ -591,6 +593,7 @@ cat << END
   --with-pcre=DIR                    set path to PCRE library sources
   --with-pcre-opt=OPTIONS            set additional build options for PCRE
   --without-pcre-jit                 don't build PCRE with JIT compilation support
+  --without-pcre2                    do not use PCRE2 library
 
   --with-zlib=DIR                    set path to zlib library sources
   --with-zlib-opt=OPTIONS            set additional build options for zlib

@@ -5,6 +5,110 @@
 <change_log title="nginx">
 
 
+<changes ver="1.22.0" date="2022-05-24">
+
+<change>
+<para lang="ru">
+Стабильная ветка 1.22.x.
+</para>
+<para lang="en">
+1.22.x stable branch.
+</para>
+</change>
+
+</changes>
+
+
+<changes ver="1.21.6" date="2022-01-25">
+
+<change type="bugfix">
+<para lang="ru">
+при использование EPOLLEXCLUSIVE на Linux
+распределение клиентских соединений между рабочими процессами
+было неравномерным.
+</para>
+<para lang="en">
+when using EPOLLEXCLUSIVE on Linux
+client connections were unevenly distributed
+among worker processes.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+во время плавного завершения старых рабочих процессов
+nginx возвращал в ответах строку заголовка "Connection: keep-alive".
+</para>
+<para lang="en">
+nginx returned the "Connection: keep-alive" header line in responses
+during graceful shutdown of old worker processes.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+в директиве ssl_session_ticket_key при использовании TLSv1.3.
+</para>
+<para lang="en">
+in the "ssl_session_ticket_key" when using TLSv1.3.
+</para>
+</change>
+
+</changes>
+
+
+<changes ver="1.21.5" date="2021-12-28">
+
+<change type="change">
+<para lang="ru">
+теперь nginx по умолчанию собирается с библиотекой PCRE2.
+</para>
+<para lang="en">
+now nginx is built with the PCRE2 library by default.
+</para>
+</change>
+
+<change type="change">
+<para lang="ru">
+теперь nginx всегда использует sendfile(SF_NODISKIO) на FreeBSD.
+</para>
+<para lang="en">
+now nginx always uses sendfile(SF_NODISKIO) on FreeBSD.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+поддержка sendfile(SF_NOCACHE) на FreeBSD.
+</para>
+<para lang="en">
+support for sendfile(SF_NOCACHE) on FreeBSD.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+переменная $ssl_curve.
+</para>
+<para lang="en">
+the $ssl_curve variable.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+при использовании HTTP/2 без SSL вместе с директивами sendfile и aio
+соединения могли зависать.
+</para>
+<para lang="en">
+connections might hang
+when using HTTP/2 without SSL with the "sendfile" and "aio" directives.
+</para>
+</change>
+
+</changes>
+
+
 <changes ver="1.21.4" date="2021-11-02">
 
 <change type="change">
